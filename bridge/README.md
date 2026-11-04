@@ -97,18 +97,32 @@ When inserting SQL, the command text is a SQL string; escape SQL single quotes a
 
 There are many different Unreal MCP implementations. For example, [FFZackFair92/unreal-engine-mcp](https://github.com/FFZackFair92/unreal-engine-mcp) documents a stdio command `python -m unreal_mcp.server`; [SallahBoussettah/UnrealMCP](https://github.com/SallahBoussettah/UnrealMCP) documents a Python stdio MCP server and a separate Unreal Editor plugin. Their installation, editor configuration, available tools, supported engine versions and behavior differ. Follow the specific project's setup, inspect/trust its code, and make sure it works locally first. This bridge does not install an Unreal plugin, start the editor, or implement an Unreal protocol itself.
 
-The bridge supports **stdio MCP servers only**. Install the official Python MCP SDK in the same Python environment used for the worker (Python 3.10+):
+The bridge supports three MCP transports — stdio, Streamable HTTP, and SSE. Install the official Python MCP SDK in the same Python environment used for the worker (Python 3.10+):
 
 ```sh
 python -m pip install "mcp>=1,<2"
 ```
 
-Create a private local JSON configuration file, **outside the repository**, containing the executable, arguments, and optionally environment values needed by your chosen MCP server. Example for FFZackFair92's implementation (adjust the executable and installation to your system):
+Create a private local JSON configuration file, **outside the repository**, containing the transport and connection details needed by your chosen MCP server.
+
+**stdio transport** (spawns a local MCP server process):
 
 ```json
-{"command":"python", "args":["-m","unreal_mcp.server"], "env":{}}
+{"transport":"stdio", "command":"python", "args":["-m","unreal_mcp.server"], "env":{}}
 ```
 
-Set `BRIDGE_MCP_CONFIG` to the absolute path of that file before starting the worker, e.g. `$env:BRIDGE_MCP_CONFIG = 'C:\path\to\mcp-config.json'` in PowerShell or `export BRIDGE_MCP_CONFIG='/path/to/mcp-config.json'` on macOS/Linux. Config is chosen locally and cannot be set by queue requests. Keep credentials out of Git and do not put the Supabase secret in this config. The MCP SDK passes a limited default environment plus the config's explicit environment to the child process, not the worker's full environment.
+**Streamable HTTP transport** (connects to an HTTP MCP endpoint, e.g. Unreal on port 8000):
+
+```json
+{"transport":"streamable_http", "url":"http://127.0.0.1:8000/mcp", "headers":{}}
+```
+
+**SSE transport** (connects to a Server-Sent Events MCP endpoint):
+
+```json
+{"transport":"sse", "url":"http://127.0.0.1:8000/sse", "headers":{}}
+```
+
+Set `BRIDGE_MCP_CONFIG` to the absolute path of that file before starting the worker, e.g. `$env:BRIDGE_MCP_CONFIG = 'C:\path\to\mcp-config.json'` in PowerShell or `export BRIDGE_MCP_CONFIG='/path/to/mcp-config.json'` on macOS/Linux. Restart the worker after changing the config. Config is chosen locally and cannot be set by queue requests. Keep credentials out of Git and do not put the Supabase secret in this config. The MCP SDK passes a limited default environment plus the config's explicit environment to the child process, not the worker's full environment.
 
 Use `mcp.list` first to discover the real tool names, input schemas and an optional `nextCursor`; provide that as `"cursor"` in another `mcp.list` request for the next page. Then submit `mcp.call` with the exact `tool` and `arguments`. The raw MCP response is returned up to 32 KiB; larger responses return a truncated JSON preview. Tool-reported `isError` marks the job failed. A new MCP server process and session is created per request, so servers that require persistent state across calls may not work. The worker's timeout covers the MCP session, but a timeout does **not** guarantee that a side effect in the editor was cancelled. Check Unreal before retrying. MCP tools can read or modify arbitrary project assets and may execute code regardless of the file path restrictions; approve only understood requests. This adapter has been tested against a fake MCP server, not a live Unreal Editor.

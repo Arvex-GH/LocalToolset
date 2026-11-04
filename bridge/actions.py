@@ -77,7 +77,25 @@ def file_action(action, root):
     raise ValueError('Unknown file operation')
 
 
-async def mcp_action(action, config):
+async def _mcp_session(session, action):
+    if action['op'] == 'mcp.list':
+        cursor = action.get('cursor')
+        if cursor is not None and not isinstance(cursor, str):
+            raise ValueError('mcp.list cursor must be a string')
+        result = await session.list_tools(cursor=cursor)
+    else:
+        tool, arguments = action.get('tool'), action.get('arguments', {})
+        if not isinstance(tool, str) or not tool or not isinstance(arguments, dict):
+            raise ValueError('mcp.call requires a tool name and arguments object')
+        result = await session.call_tool(tool, arguments=arguments)
+    data = result.model_dump(mode='json', by_alias=True, exclude_none=True)
+    encoded = json.dumps(data, ensure_ascii=True).encode('utf-8')
+    if len(encoded) > MAX_RESULT_BYTES:
+        return {'truncated': True, 'is_error': bool(data.get('isError')), 'preview': encoded[:MAX_RESULT_BYTES].decode('utf-8', 'ignore')}
+    return {'truncated': False, 'response': data}
+
+
+async def stdio_mcp_action(action, config):
     try:
         from mcp import ClientSession, StdioServerParameters
         from mcp.client.stdio import stdio_client
@@ -98,21 +116,54 @@ async def mcp_action(action, config):
     async with stdio_client(params) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
-            if action['op'] == 'mcp.list':
-                cursor = action.get('cursor')
-                if cursor is not None and not isinstance(cursor, str):
-                    raise ValueError('mcp.list cursor must be a string')
-                result = await session.list_tools(cursor=cursor)
-            else:
-                tool, arguments = action.get('tool'), action.get('arguments', {})
-                if not isinstance(tool, str) or not tool or not isinstance(arguments, dict):
-                    raise ValueError('mcp.call requires a tool name and arguments object')
-                result = await session.call_tool(tool, arguments=arguments)
-            data = result.model_dump(mode='json', by_alias=True, exclude_none=True)
-            encoded = json.dumps(data, ensure_ascii=True).encode('utf-8')
-            if len(encoded) > MAX_RESULT_BYTES:
-                return {'truncated': True, 'is_error': bool(data.get('isError')), 'preview': encoded[:MAX_RESULT_BYTES].decode('utf-8', 'ignore')}
-            return {'truncated': False, 'response': data}
+            return await _mcp_session(session, action)
+
+
+async def http_mcp_action(action, config):
+    """MCP over Streamable HTTP or SSE transport (e.g. Unreal on port 8000)."""
+    try:
+        from mcp import ClientSession
+    except ImportError as exc:
+        raise ValueError('MCP support requires: python -m pip install "mcp>=1,<2"') from exc
+
+    transport = config.get('transport', 'streamable_http')
+    url = config.get('url')
+    if not isinstance(url, str) or not url:
+        raise ValueError('HTTP MCP config requires a url (e.g. http://127.0.0.1:8000/mcp)')
+    headers = config.get('headers', {})
+    if not isinstance(headers, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in headers.items()):
+        raise ValueError('HTTP MCP config headers must be a string-to-string object')
+
+    if transport == 'streamable_http':
+        try:
+            from mcp.client.streamable_http import streamable_http_client
+        except ImportError as exc:
+            raise ValueError('Streamable HTTP transport requires mcp>=1,<2') from exc
+        async with streamable_http_client(url, headers=headers) as (read, write):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                return await _mcp_session(session, action)
+    elif transport == 'sse':
+        try:
+            from mcp.client.sse import sse_client
+        except ImportError as exc:
+            raise ValueError('SSE transport requires mcp>=1,<2') from exc
+        async with sse_client(url, headers=headers) as (read, write):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                return await _mcp_session(session, action)
+    else:
+        raise ValueError('Unknown MCP transport: ' + str(transport) + ' (use "stdio", "streamable_http", or "sse")')
+
+
+async def mcp_action(action, config):
+    """Dispatch to the configured MCP transport (stdio | streamable_http | sse)."""
+    transport = config.get('transport', 'stdio')
+    if transport == 'stdio':
+        return await stdio_mcp_action(action, config)
+    if transport in ('streamable_http', 'sse'):
+        return await http_mcp_action(action, config)
+    raise ValueError('Unknown MCP transport: ' + str(transport) + ' (use "stdio", "streamable_http", or "sse")')
 
 
 def dispatch(action, root, timeout):
