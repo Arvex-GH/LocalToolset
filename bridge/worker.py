@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Approval-gated local shell worker. Requires only Python's standard library."""
+"""Local command worker. Approval is required unless --auto is explicitly enabled."""
+import argparse
 import json
 import os
 from pathlib import Path
@@ -46,7 +47,20 @@ def execute(command, cwd, timeout):
                         'stdout': read_output(stdout), 'stderr': read_output(stderr)}
 
 
-def main():
+def approved(auto):
+    if auto:
+        print('AUTO MODE: executing without local approval.', flush=True)
+        return True
+    try:
+        return input('Execute with your local account privileges? Type YES to approve: ') == 'YES'
+    except EOFError:
+        return False
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description='Run the local Supabase command worker.', allow_abbrev=False)
+    parser.add_argument('--auto', action='store_true', help='DANGEROUS: automatically execute every queued command without approval')
+    args = parser.parse_args(argv)
     base = os.environ.get('SUPABASE_URL', '').rstrip('/')
     key = os.environ.get('SUPABASE_SECRET_KEY', '')
     if not base.startswith('https://') or not key:
@@ -62,7 +76,11 @@ def main():
     except ValueError:
         sys.exit('BRIDGE_POLL_SECONDS must be 1–300; BRIDGE_TIMEOUT_SECONDS must be 1–600.')
     worker = str(uuid.uuid4())
-    print(f'Bridge {worker} started; working directory: {cwd}. Every command requires local approval.', flush=True)
+    print(f'Bridge {worker} started; working directory: {cwd}.', flush=True)
+    if args.auto:
+        print('WARNING: AUTO MODE ENABLED. Every queued shell, file, and MCP request will run without approval as this user. Stop with Ctrl+C.', flush=True)
+    else:
+        print('Every command requires local approval.', flush=True)
     while True:
         try:
             rows = request(base, key, 'POST', 'rpc/arena_bridge_claim', {'p_worker_id': worker})
@@ -71,11 +89,7 @@ def main():
                 continue
             job = rows[0]
             print('\n' + '=' * 60 + '\nRequest ' + job['id'] + '\nWorking directory: ' + str(cwd) + '\nCommand (Python string representation):\n' + repr(job['command']) + '\n' + '=' * 60, flush=True)
-            try:
-                answer = input('Execute with your local account privileges? Type YES to approve: ')
-            except EOFError:
-                answer = ''
-            if answer == 'YES':
+            if approved(args.auto):
                 try:
                     action = parse_command(job['command'])
                     if action['op'] == 'shell':
