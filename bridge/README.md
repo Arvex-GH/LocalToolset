@@ -1,18 +1,19 @@
 # Arena local command bridge (prototype)
 
-This is a local, approval-gated worker, not a network server: it makes outbound HTTPS requests to a Supabase queue every 3 seconds by default. Arena can enqueue commands and read results using its Supabase connector. No Edge Functions are necessary. A terminal on your computer must remain open to approve each command by typing `YES`. In addition to legacy shell commands, structured `/bridge` commands provide direct text file operations and an optional standard stdio MCP client. The worker launches the locally configured MCP server for each MCP request; configure and install an Unreal MCP implementation separately.
+This is a local, approval-gated worker, not a network server: it makes outbound HTTPS requests to a Supabase queue every 3 seconds by default. Arena can enqueue commands and read results using its Supabase connector. No Edge Functions are necessary. By default, a terminal on your computer must remain open to approve each command by typing `YES`. An explicitly enabled `--auto` mode skips approvals; see its security warning below. In addition to legacy shell commands, structured `/bridge` commands provide direct text file operations and an optional standard stdio MCP client. The worker launches the locally configured MCP server for each MCP request; configure and install an Unreal MCP implementation separately.
 
 ## Security — read before running
 
 - Every approved shell command and MCP tool runs with **all the privileges of your local user**. The working directory is only a starting directory, not a sandbox: commands can access other folders, network, credentials, and programs. Carefully inspect every command; do not approve commands you don't understand. Use a separate OS user or VM for stronger isolation.
 - The worker uses a Supabase **secret/service-role key**. This key has broad project-wide privileges and bypasses RLS. Use a dedicated Supabase project, keep the key private, and revoke/rotate it if exposed. Never share it in chat, put it in source control, or use it in frontend code. Anyone possessing the key may enqueue requests, read results, or access other project data. Approval protects against automatic local execution, not against unauthorized queue access.
+- **`--auto` removes the approval barrier completely.** Anyone or anything that can insert into the queue—including an attacker with project access or a compromised key—can run shell commands, read and write files, and invoke MCP tools as your local OS user. Existing pending commands will also run. It does not grant Windows administrator rights unless you launched the worker as an administrator. Use a dedicated project, least-privilege OS account or VM, keep credentials private, review/clear unexpected pending requests before starting, and stop the worker when not in use. Never enable auto mode on an untrusted queue.
 - Command text and output are stored in Supabase and visible to project administrators and service-role key holders. Don't run commands that print passwords, tokens, or sensitive files. Output is truncated to 32 KiB per stream before upload, but temporary files can consume disk while a command runs. Running commands can themselves write arbitrary amounts of data.
 - A timeout terminates the shell process but **does not guarantee its descendants are terminated**, especially on Windows. Commands can launch persistent processes; inspect them before approving.
 
 ## Setup on your computer
 
 1. Install Python 3.9 or later. Download this repository/branch to your computer. File and shell operations require no Python packages; MCP support requires the optional SDK described below.
-2. The queue schema is in `schema.sql`; it has already been deployed to the `ArenaConnectMCP` project for this session. If using a fresh project, apply that file once in its SQL editor. The schema is not intended to be reapplied to the same project.
+2. The queue schema is in `schema.sql`; it has already been deployed to the `ArenaConnectMCP` project for this session. If using a fresh project, apply that file once in its SQL editor, then apply `wait.sql` once. The wait function has also been deployed to ArenaConnectMCP. The schema is not intended to be reapplied to the same project.
 3. In Supabase Project Settings → API Keys, obtain a **secret** key for this dedicated project. Set it as an environment variable *locally*, not in a tracked file or chat. The publishable key will not work. Restrict access to your terminal and environment.
 4. Open a terminal in the downloaded repository. For Windows PowerShell (replace values locally):
 
@@ -32,6 +33,14 @@ export BRIDGE_CWD='/path/to/your/project'
 python3 bridge/worker.py
 ```
 
+To explicitly enable automatic execution instead of per-command approval, start the same worker with `--auto`:
+
+```powershell
+py bridge/worker.py --auto
+```
+
+On macOS/Linux: `python3 bridge/worker.py --auto`. Auto mode lasts only for that process. Stop it with Ctrl+C; start without `--auto` to return to approval mode. **This bypasses approval for every shell, file, and MCP operation, including commands already pending.**
+
 The shell will retain these environment variables until it exits; close it when finished. You can set `BRIDGE_POLL_SECONDS` (1–300, default 3) and `BRIDGE_TIMEOUT_SECONDS` (1–600, default 60). Stop the worker with Ctrl+C. Use only one worker unless you're intentionally sharing the queue: **there is no device targeting**, so any connected worker can claim any pending job.
 
 ## Usage from Arena
@@ -42,13 +51,23 @@ Ask Arena to submit a command. It can use the Supabase connector to insert a row
 insert into public.arena_bridge_commands(command) values ('echo hello from the local bridge') returning id, status;
 ```
 
-The worker atomically claims one pending row. After inspecting it locally, type `YES` to execute or anything else to reject. Arena can query the result:
+The worker atomically claims one pending row. In default mode, after inspecting it locally, type `YES` to execute or anything else to reject. In `--auto` mode, it executes without asking. Arena can query the result:
 
 ```sql
 select id, status, result from public.arena_bridge_commands where id = '<actual id>';
 ```
 
-Commands are executed at most once by this worker, not necessarily exactly once: if it crashes after claiming or during execution, the row remains `running` and the command might or might not have run. If a result upload fails, the worker retries uploading without rerunning. Never automatically reset a `running` job; first inspect the local machine and logs. Rows remain in the database until an administrator deletes them. The connector itself does not continuously listen: Arena has to query again to see results.
+Commands are executed at most once by this worker, not necessarily exactly once: if it crashes after claiming or during execution, the row remains `running` and the command might or might not have run. If a result upload fails, the worker retries uploading without rerunning. Never automatically reset a `running` job; first inspect the local machine and logs. Rows remain in the database until an administrator deletes them.
+
+### Waiting for results from Arena
+
+After enqueuing, Arena should call the Supabase SQL connector with the returned job ID:
+
+```sql
+select id, status, result from public.arena_bridge_wait('<actual job uuid>', 15);
+```
+
+This database function checks approximately once per second and returns as soon as the job reaches `completed`, `failed`, or `rejected`, or after at most 15 seconds with its current status. If still pending or running, Arena may call it again while the user request remains active; if a reasonable overall deadline is reached, report that the job is still pending/running rather than assuming failure or resubmitting it. A missing row returns no rows. This is **database-side polling invoked via the connector**, not a persistent background listener or a direct connection from the Arena sandbox. It cannot continue independently between turns, and connector or database timeouts may end a wait early. The worker's separate `BRIDGE_POLL_SECONDS` setting controls how quickly it picks up jobs (3 seconds by default; use 1 for lower latency).
 
 ## Testing
 
@@ -57,7 +76,7 @@ Commands are executed at most once by this worker, not necessarily exactly once:
 
 ## Structured commands (no database migration required)
 
-Place `/bridge ` followed by a JSON object in the existing `command` column. Any command **without** that exact prefix remains a legacy shell command. Malformed structured commands fail; they are never executed as shell. All actions, including reads, MCP discovery, and MCP calls, require the same local `YES` approval. Examples of command values:
+Place `/bridge ` followed by a JSON object in the existing `command` column. Any command **without** that exact prefix remains a legacy shell command. Malformed structured commands fail; they are never executed as shell. By default all actions, including reads, MCP discovery, and MCP calls, require the same local `YES` approval. Explicit `--auto` mode skips it for all actions. Examples of command values:
 
 ```text
 /bridge {"op":"read","path":"Source/example.cpp"}

@@ -3,6 +3,7 @@ from pathlib import Path
 import tempfile
 import sys
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'bridge'))
 spec = importlib.util.spec_from_file_location('worker', Path(__file__).resolve().parents[1] / 'bridge' / 'worker.py')
@@ -10,6 +11,25 @@ worker = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(worker)
 
 class WorkerTests(unittest.TestCase):
+    def test_auto_skips_prompt(self):
+        with patch('builtins.input', side_effect=AssertionError('must not prompt')):
+            self.assertTrue(worker.approved(True))
+
+    def test_default_requires_exact_yes_and_rejects_eof(self):
+        for answer, expected in [('YES', True), ('yes', False), ('', False)]:
+            with self.subTest(answer=answer), patch('builtins.input', return_value=answer):
+                self.assertEqual(worker.approved(False), expected)
+        with patch('builtins.input', side_effect=EOFError):
+            self.assertFalse(worker.approved(False))
+
+    def test_help_includes_auto_and_bad_flag_fails(self):
+        with patch('sys.stdout'), self.assertRaises(SystemExit) as cm:
+            worker.main(['--help'])
+        self.assertEqual(cm.exception.code, 0)
+        with patch('sys.stderr'), self.assertRaises(SystemExit) as cm:
+            worker.main(['--aut'])
+        self.assertEqual(cm.exception.code, 2)
+
     def test_execution_and_exit_code(self):
         with tempfile.TemporaryDirectory() as directory:
             status, result = worker.execute('python -c "print(123)"', directory, 10)
