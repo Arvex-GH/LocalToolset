@@ -21,21 +21,15 @@ def parse_command(command):
     return action
 
 
-def project_path(roots, value):
+def project_path(value, cwd=None):
     if not isinstance(value, str) or not value or '\\x00' in value:
         raise ValueError('path must be a non-empty string')
-    rel = Path(value)
-    if rel.is_absolute():
-        raise ValueError('Absolute paths are not allowed')
-    result = None
-    for root in roots:
-        root = Path(root).resolve()
-        candidate = (root / rel).resolve()
-        if candidate == root or root in candidate.parents:
-            result = candidate
-            break
-    if result is None:
-        raise ValueError('Path is outside allowed roots')
+    p = Path(value)
+    if p.is_absolute():
+        result = p.resolve()
+    else:
+        base = Path(cwd).resolve() if cwd else Path.cwd()
+        result = (base / p).resolve()
     return result
 
 
@@ -47,8 +41,8 @@ def bounded_text(path):
     return data.decode('utf-8')
 
 
-def file_action(action, roots):
-    path = project_path(roots, action.get('path'))
+def file_action(action, cwd=None):
+    path = project_path(action.get('path'), cwd)
     op = action['op']
     if op == 'read':
         text = bounded_text(path)
@@ -169,10 +163,10 @@ async def mcp_action(action, config):
     raise ValueError('Unknown MCP transport: ' + str(transport) + ' (use "stdio", "streamable_http", or "sse")')
 
 
-def dispatch(action, roots, timeout):
+def dispatch(action, cwd=None, timeout=60):
     if action['op'] in ('read', 'write', 'edit'):
-        return file_action(action, roots)
-    config_path = os.environ.get('BRIDGE_MCP_CONFIG') or 'D:\\mcp-config.json'
+        return file_action(action, cwd)
+    config_path = os.environ.get('BRIDGE_MCP_CONFIG')
     if not config_path:
         raise ValueError('Set BRIDGE_MCP_CONFIG to a local MCP JSON file')
     with open(config_path, encoding='utf-8') as f:
