@@ -136,7 +136,10 @@ async def http_mcp_action(action, config):
             from mcp.client.streamable_http import streamable_http_client
         except ImportError as exc:
             raise ValueError('Streamable HTTP transport requires mcp>=1,<2') from exc
-        async with streamable_http_client(url, headers=headers) as (read, write):
+        kwargs = {}
+        if headers:
+            kwargs['headers'] = headers
+        async with streamable_http_client(url, **kwargs) as (read, write):
             async with ClientSession(read, write) as session:
                 await session.initialize()
                 return await _mcp_session(session, action)
@@ -145,7 +148,10 @@ async def http_mcp_action(action, config):
             from mcp.client.sse import sse_client
         except ImportError as exc:
             raise ValueError('SSE transport requires mcp>=1,<2') from exc
-        async with sse_client(url, headers=headers) as (read, write):
+        kwargs = {}
+        if headers:
+            kwargs['headers'] = headers
+        async with sse_client(url, **kwargs) as (read, write):
             async with ClientSession(read, write) as session:
                 await session.initialize()
                 return await _mcp_session(session, action)
