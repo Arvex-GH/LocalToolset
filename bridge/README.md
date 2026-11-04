@@ -1,17 +1,17 @@
 # Arena local command bridge (prototype)
 
-This is a local, approval-gated worker, not a network server: it makes outbound HTTPS requests to a Supabase queue every 3 seconds by default. Arena can enqueue commands and read results using its Supabase connector. No Edge Functions are necessary. A terminal on your computer must remain open to approve each command by typing `YES`. This is **not yet an Unreal MCP client**: commands run in your system shell; an MCP integration would be a separate addition.
+This is a local, approval-gated worker, not a network server: it makes outbound HTTPS requests to a Supabase queue every 3 seconds by default. Arena can enqueue commands and read results using its Supabase connector. No Edge Functions are necessary. A terminal on your computer must remain open to approve each command by typing `YES`. In addition to legacy shell commands, structured `/bridge` commands provide direct text file operations and an optional standard stdio MCP client. The worker launches the locally configured MCP server for each MCP request; configure and install an Unreal MCP implementation separately.
 
 ## Security — read before running
 
-- Every approved command runs with **all the privileges of your local user**. The working directory is only a starting directory, not a sandbox: commands can access other folders, network, credentials, and programs. Carefully inspect every command; do not approve commands you don't understand. Use a separate OS user or VM for stronger isolation.
+- Every approved shell command and MCP tool runs with **all the privileges of your local user**. The working directory is only a starting directory, not a sandbox: commands can access other folders, network, credentials, and programs. Carefully inspect every command; do not approve commands you don't understand. Use a separate OS user or VM for stronger isolation.
 - The worker uses a Supabase **secret/service-role key**. This key has broad project-wide privileges and bypasses RLS. Use a dedicated Supabase project, keep the key private, and revoke/rotate it if exposed. Never share it in chat, put it in source control, or use it in frontend code. Anyone possessing the key may enqueue requests, read results, or access other project data. Approval protects against automatic local execution, not against unauthorized queue access.
 - Command text and output are stored in Supabase and visible to project administrators and service-role key holders. Don't run commands that print passwords, tokens, or sensitive files. Output is truncated to 32 KiB per stream before upload, but temporary files can consume disk while a command runs. Running commands can themselves write arbitrary amounts of data.
 - A timeout terminates the shell process but **does not guarantee its descendants are terminated**, especially on Windows. Commands can launch persistent processes; inspect them before approving.
 
 ## Setup on your computer
 
-1. Install Python 3.9 or later. Download this repository/branch to your computer. The worker requires no Python packages.
+1. Install Python 3.9 or later. Download this repository/branch to your computer. File and shell operations require no Python packages; MCP support requires the optional SDK described below.
 2. The queue schema is in `schema.sql`; it has already been deployed to the `ArenaConnectMCP` project for this session. If using a fresh project, apply that file once in its SQL editor. The schema is not intended to be reapplied to the same project.
 3. In Supabase Project Settings → API Keys, obtain a **secret** key for this dedicated project. Set it as an environment variable *locally*, not in a tracked file or chat. The publishable key will not work. Restrict access to your terminal and environment.
 4. Open a terminal in the downloaded repository. For Windows PowerShell (replace values locally):
@@ -52,4 +52,39 @@ Commands are executed at most once by this worker, not necessarily exactly once:
 
 ## Testing
 
-`python -m unittest discover -s tests -v` tests local command execution, timeouts and output truncation without reaching Supabase. An end-to-end test requires a local worker and local approval, plus access to the project.
+`python -m unittest discover -s tests -v` tests file operations and local command execution without reaching Supabase. If the MCP SDK is installed it also runs an integration test against a local fake stdio MCP server; otherwise that test is skipped. An end-to-end test requires a local worker and local approval, plus access to the project.
+
+
+## Structured commands (no database migration required)
+
+Place `/bridge ` followed by a JSON object in the existing `command` column. Any command **without** that exact prefix remains a legacy shell command. Malformed structured commands fail; they are never executed as shell. All actions, including reads, MCP discovery, and MCP calls, require the same local `YES` approval. Examples of command values:
+
+```text
+/bridge {"op":"read","path":"Source/example.cpp"}
+/bridge {"op":"write","path":"Source/new.cpp","content":"Hello\n"}
+/bridge {"op":"edit","path":"Source/example.cpp","old":"old text","new":"new text"}
+/bridge {"op":"mcp.list"}
+/bridge {"op":"mcp.call","tool":"actual_tool_name","arguments":{}}
+```
+
+When inserting SQL, the command text is a SQL string; escape SQL single quotes as usual. Paths must be relative to `BRIDGE_CWD` and resolved inside it; symlinks pointing outside are rejected. Direct file operations handle UTF-8 text only; read and edit inputs and written output are limited to 1 MB; read results are truncated to 32 KiB. Write creates a new file by default: use `"overwrite":true` to overwrite an existing file. Parent directories must exist. Edit uses an exact, case-sensitive match that must occur exactly once. These checks are not an OS sandbox: concurrent filesystem modifications can change paths between validation and use, and shell/MCP access can bypass path restrictions entirely. Avoid using the bridge with untrusted local users or concurrently modified project directories.
+
+## Optional Unreal MCP setup
+
+There are many different Unreal MCP implementations. For example, [FFZackFair92/unreal-engine-mcp](https://github.com/FFZackFair92/unreal-engine-mcp) documents a stdio command `python -m unreal_mcp.server`; [SallahBoussettah/UnrealMCP](https://github.com/SallahBoussettah/UnrealMCP) documents a Python stdio MCP server and a separate Unreal Editor plugin. Their installation, editor configuration, available tools, supported engine versions and behavior differ. Follow the specific project's setup, inspect/trust its code, and make sure it works locally first. This bridge does not install an Unreal plugin, start the editor, or implement an Unreal protocol itself.
+
+The bridge supports **stdio MCP servers only**. Install the official Python MCP SDK in the same Python environment used for the worker (Python 3.10+):
+
+```sh
+python -m pip install "mcp>=1,<2"
+```
+
+Create a private local JSON configuration file, **outside the repository**, containing the executable, arguments, and optionally environment values needed by your chosen MCP server. Example for FFZackFair92's implementation (adjust the executable and installation to your system):
+
+```json
+{"command":"python", "args":["-m","unreal_mcp.server"], "env":{}}
+```
+
+Set `BRIDGE_MCP_CONFIG` to the absolute path of that file before starting the worker, e.g. `$env:BRIDGE_MCP_CONFIG = 'C:\path\to\mcp-config.json'` in PowerShell or `export BRIDGE_MCP_CONFIG='/path/to/mcp-config.json'` on macOS/Linux. Config is chosen locally and cannot be set by queue requests. Keep credentials out of Git and do not put the Supabase secret in this config. The MCP SDK passes a limited default environment plus the config's explicit environment to the child process, not the worker's full environment.
+
+Use `mcp.list` first to discover the real tool names, input schemas and an optional `nextCursor`; provide that as `"cursor"` in another `mcp.list` request for the next page. Then submit `mcp.call` with the exact `tool` and `arguments`. The raw MCP response is returned up to 32 KiB; larger responses return a truncated JSON preview. Tool-reported `isError` marks the job failed. A new MCP server process and session is created per request, so servers that require persistent state across calls may not work. The worker's timeout covers the MCP session, but a timeout does **not** guarantee that a side effect in the editor was cancelled. Check Unreal before retrying. MCP tools can read or modify arbitrary project assets and may execute code regardless of the file path restrictions; approve only understood requests. This adapter has been tested against a fake MCP server, not a live Unreal Editor.
