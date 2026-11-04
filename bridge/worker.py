@@ -16,6 +16,38 @@ import uuid
 from actions import parse_command, dispatch
 
 MAX_OUTPUT = 32_768
+ENV_KEYS = frozenset({
+    'SUPABASE_URL', 'SUPABASE_SECRET_KEY', 'BRIDGE_CWD',
+    'BRIDGE_POLL_SECONDS', 'BRIDGE_TIMEOUT_SECONDS', 'BRIDGE_MCP_CONFIG',
+})
+
+
+def load_env_file(path):
+    """Load supported settings without overriding the process environment.
+
+    Values are literal: no expansion, escapes, or inline comments. Matching
+    outer single/double quotes are stripped; Windows backslashes are preserved.
+    """
+    path = Path(path)
+    if not path.exists():
+        return
+    values = {}
+    with path.open(encoding='utf-8-sig') as stream:
+        for line_number, line in enumerate(stream, 1):
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+            name, separator, value = line.partition('=')
+            name, value = name.strip(), value.strip()
+            if not separator or name not in ENV_KEYS or name in values:
+                raise ValueError(f'Invalid or duplicate setting on line {line_number}')
+            if value.startswith(('"', "'")):
+                if len(value) < 2 or value[-1] != value[0]:
+                    raise ValueError(f'Unmatched quote on line {line_number}')
+                value = value[1:-1]
+            values[name] = value
+    for name, value in values.items():
+        os.environ.setdefault(name, value)
 
 
 def request(base, key, method, path, payload=None, prefer=None):
@@ -61,10 +93,14 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description='Run the local Supabase command worker.', allow_abbrev=False)
     parser.add_argument('--auto', action='store_true', help='DANGEROUS: automatically execute every queued command without approval')
     args = parser.parse_args(argv)
+    try:
+        load_env_file(Path(__file__).resolve().parent / '.env')
+    except (OSError, UnicodeError, ValueError) as exc:
+        sys.exit(f'Cannot load bridge/.env: {exc}')
     base = os.environ.get('SUPABASE_URL', '').rstrip('/')
     key = os.environ.get('SUPABASE_SECRET_KEY', '')
     if not base.startswith('https://') or not key:
-        sys.exit('Set SUPABASE_URL (https) and SUPABASE_SECRET_KEY in your environment.')
+        sys.exit('Set SUPABASE_URL (https) and SUPABASE_SECRET_KEY in bridge/.env or your environment.')
     cwd = Path(os.environ.get('BRIDGE_CWD', '.')).resolve()
     if not cwd.is_dir():
         sys.exit('BRIDGE_CWD must be an existing directory.')
