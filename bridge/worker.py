@@ -12,6 +12,8 @@ import urllib.parse
 import urllib.request
 import uuid
 
+from actions import parse_command, dispatch
+
 MAX_OUTPUT = 32_768
 
 
@@ -74,7 +76,15 @@ def main():
             except EOFError:
                 answer = ''
             if answer == 'YES':
-                status, result = execute(job['command'], str(cwd), timeout)
+                try:
+                    action = parse_command(job['command'])
+                    if action['op'] == 'shell':
+                        status, result = execute(action['command'], str(cwd), timeout)
+                    else:
+                        result = dispatch(action, cwd, timeout)
+                        status = 'failed' if result.get('is_error') or result.get('response', {}).get('isError') else 'completed'
+                except Exception as exc:
+                    status, result = 'failed', {'error': type(exc).__name__, 'message': str(exc)[:2000]}
             else:
                 status, result = 'rejected', {'message': 'Not approved locally.'}
             path = 'arena_bridge_commands?id=eq.' + urllib.parse.quote(job['id'], safe='') + '&worker_id=eq.' + worker + '&status=eq.running'
