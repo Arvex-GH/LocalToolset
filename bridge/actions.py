@@ -21,16 +21,21 @@ def parse_command(command):
     return action
 
 
-def project_path(root, value):
-    if not isinstance(value, str) or not value or '\x00' in value:
+def project_path(roots, value):
+    if not isinstance(value, str) or not value or '\\x00' in value:
         raise ValueError('path must be a non-empty string')
     rel = Path(value)
     if rel.is_absolute():
         raise ValueError('Absolute paths are not allowed')
-    root = Path(root).resolve()
-    result = (root / rel).resolve()
-    if result == root or root not in result.parents:
-        raise ValueError('Path is outside BRIDGE_CWD')
+    result = None
+    for root in roots:
+        root = Path(root).resolve()
+        candidate = (root / rel).resolve()
+        if candidate == root or root in candidate.parents:
+            result = candidate
+            break
+    if result is None:
+        raise ValueError('Path is outside allowed roots')
     return result
 
 
@@ -42,8 +47,8 @@ def bounded_text(path):
     return data.decode('utf-8')
 
 
-def file_action(action, root):
-    path = project_path(root, action.get('path'))
+def file_action(action, roots):
+    path = project_path(roots, action.get('path'))
     op = action['op']
     if op == 'read':
         text = bounded_text(path)
@@ -57,7 +62,6 @@ def file_action(action, root):
             raise ValueError('write requires string content and optional boolean overwrite')
         if len(content.encode('utf-8')) > MAX_FILE_BYTES:
             raise ValueError('Content exceeds 1 MB limit')
-        # Parent must already exist; avoid surprising directory creation.
         with path.open('w' if overwrite else 'x', encoding='utf-8', newline='') as f:
             f.write(content)
         return {'path': action['path'], 'bytes_written': len(content.encode('utf-8'))}
@@ -109,7 +113,6 @@ async def stdio_mcp_action(action, config):
         raise ValueError('MCP config args must be a list of strings')
     if not isinstance(env, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in env.items()):
         raise ValueError('MCP config env must be a string-to-string object')
-    # No Supabase key is passed to the MCP server. SDK supplies its safe default env.
     if 'SUPABASE_SECRET_KEY' in env:
         raise ValueError('Do not pass the Supabase secret key to the MCP server')
     params = StdioServerParameters(command=config['command'], args=args, env=env)
@@ -166,9 +169,9 @@ async def mcp_action(action, config):
     raise ValueError('Unknown MCP transport: ' + str(transport) + ' (use "stdio", "streamable_http", or "sse")')
 
 
-def dispatch(action, root, timeout):
+def dispatch(action, roots, timeout):
     if action['op'] in ('read', 'write', 'edit'):
-        return file_action(action, root)
+        return file_action(action, roots)
     config_path = os.environ.get('BRIDGE_MCP_CONFIG') or 'D:\\mcp-config.json'
     if not config_path:
         raise ValueError('Set BRIDGE_MCP_CONFIG to a local MCP JSON file')

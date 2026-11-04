@@ -18,7 +18,7 @@ from actions import parse_command, dispatch
 MAX_OUTPUT = 32_768
 ENV_KEYS = frozenset({
     'SUPABASE_URL', 'SUPABASE_SECRET_KEY', 'BRIDGE_CWD',
-    'BRIDGE_POLL_SECONDS', 'BRIDGE_TIMEOUT_SECONDS', 'BRIDGE_MCP_CONFIG',
+    'BRIDGE_POLL_SECONDS', 'BRIDGE_TIMEOUT_SECONDS', 'BRIDGE_MCP_CONFIG', 'BRIDGE_ROOT',
 })
 
 
@@ -124,14 +124,18 @@ def main(argv=None):
                 time.sleep(interval)
                 continue
             job = rows[0]
-            print('\n' + '=' * 60 + '\nRequest ' + job['id'] + '\nWorking directory: ' + str(cwd) + '\nCommand (Python string representation):\n' + repr(job['command']) + '\n' + '=' * 60, flush=True)
+            print('\\n' + '=' * 60 + '\\nRequest ' + job['id'] + '\\nWorking directory: ' + str(cwd) + '\\nCommand (Python string representation):\\n' + repr(job['command']) + '\\n' + '=' * 60, flush=True)
             if approved(args.auto):
                 try:
                     action = parse_command(job['command'])
                     if action['op'] == 'shell':
                         status, result = execute(action['command'], str(cwd), timeout)
                     else:
-                        result = dispatch(action, cwd, timeout)
+                        roots = [str(cwd)]
+                        extra_root = os.environ.get('BRIDGE_ROOT')
+                        if extra_root:
+                            roots.append(extra_root)
+                        result = dispatch(action, roots, timeout)
                         status = 'failed' if result.get('is_error') or result.get('response', {}).get('isError') else 'completed'
                 except Exception as exc:
                     status, result = 'failed', {'error': type(exc).__name__, 'message': str(exc)[:2000]}
