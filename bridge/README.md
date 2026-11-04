@@ -14,24 +14,29 @@ This is a local, approval-gated worker, not a network server: it makes outbound 
 
 1. Install Python 3.9 or later. Download this repository/branch to your computer. File and shell operations require no Python packages; MCP support requires the optional SDK described below.
 2. The queue schema is in `schema.sql`; it has already been deployed to the `ArenaConnectMCP` project for this session. If using a fresh project, apply that file once in its SQL editor, then apply `wait.sql` once. The wait function has also been deployed to ArenaConnectMCP. The schema is not intended to be reapplied to the same project.
-3. In Supabase Project Settings → API Keys, obtain a **secret** key for this dedicated project. Set it as an environment variable *locally*, not in a tracked file or chat. The publishable key will not work. Restrict access to your terminal and environment.
-4. Open a terminal in the downloaded repository. For Windows PowerShell (replace values locally):
+3. Copy the example file to a private local `.env` file. In Windows PowerShell, from the repository root:
 
-```powershell
-$env:SUPABASE_URL = 'https://dtcdcdsnjvihzpzhijss.supabase.co'
-$env:SUPABASE_SECRET_KEY = Read-Host 'Supabase secret key'
-$env:BRIDGE_CWD = 'C:\path\to\your\project'
-py bridge/worker.py
-```
+   ```powershell
+   Copy-Item bridge/.env.example bridge/.env
+   notepad bridge/.env
+   ```
 
-On macOS/Linux:
+   On macOS/Linux: `cp bridge/.env.example bridge/.env`, then open `bridge/.env` in a text editor. Fill in your Supabase **secret** key from Project Settings → API Keys and the absolute path to your project. The URL is prefilled for ArenaConnectMCP. For example:
 
-```sh
-export SUPABASE_URL='https://dtcdcdsnjvihzpzhijss.supabase.co'
-read -rs SUPABASE_SECRET_KEY; export SUPABASE_SECRET_KEY; echo
-export BRIDGE_CWD='/path/to/your/project'
-python3 bridge/worker.py
-```
+   ```dotenv
+   SUPABASE_URL=https://dtcdcdsnjvihzpzhijss.supabase.co
+   SUPABASE_SECRET_KEY=your-secret-key-goes-here
+   BRIDGE_CWD=C:\Users\YourName\MyProject
+   ```
+
+   This is a local plaintext file containing a powerful credential. Restrict filesystem access, backups, and sharing; `.gitignore` excludes it, but verify it is never force-added to Git or sent in chat. **Never paste the real key into this example, an issue, or the agent conversation.** Anyone or any command with access to the file or the worker's environment can read the key. Use a dedicated Supabase project and a least-privileged OS account or VM.
+4. From the repository root, start the worker (it automatically reads `bridge/.env` regardless of the current working directory):
+
+   ```powershell
+   py bridge/worker.py
+   ```
+
+   On macOS/Linux: `python3 bridge/worker.py`. The file supports simple `KEY=value` lines and full-line `#` comments. Matching outer quotes are optional; values are literal (no variable expansion, backslash escaping, or inline comments). Existing environment variables override file values, including variables left over in an open terminal. You can also continue setting variables directly without a file. Restart the worker after editing the file.
 
 To explicitly enable automatic execution instead of per-command approval, start the same worker with `--auto`:
 
@@ -41,7 +46,7 @@ py bridge/worker.py --auto
 
 On macOS/Linux: `python3 bridge/worker.py --auto`. Auto mode lasts only for that process. Stop it with Ctrl+C; start without `--auto` to return to approval mode. **This bypasses approval for every shell, file, and MCP operation, including commands already pending.**
 
-The shell will retain these environment variables until it exits; close it when finished. You can set `BRIDGE_POLL_SECONDS` (1–300, default 3) and `BRIDGE_TIMEOUT_SECONDS` (1–600, default 60). Stop the worker with Ctrl+C. Use only one worker unless you're intentionally sharing the queue: **there is no device targeting**, so any connected worker can claim any pending job.
+The `.env` file persists on disk until you remove it; environment variables set in a shell persist until that shell exits. You can set `BRIDGE_POLL_SECONDS` (1–300, default 3) and `BRIDGE_TIMEOUT_SECONDS` (1–600, default 60). Stop the worker with Ctrl+C. Use only one worker unless you're intentionally sharing the queue: **there is no device targeting**, so any connected worker can claim any pending job.
 
 ## Usage from Arena
 
