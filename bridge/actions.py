@@ -169,7 +169,7 @@ async def mcp_action(action, config):
 def dispatch(action, root, timeout):
     if action['op'] in ('read', 'write', 'edit'):
         return file_action(action, root)
-    config_path = os.environ.get('BRIDGE_MCP_CONFIG')
+    config_path = os.environ.get('BRIDGE_MCP_CONFIG') or 'D:\\mcp-config.json'
     if not config_path:
         raise ValueError('Set BRIDGE_MCP_CONFIG to a local MCP JSON file')
     with open(config_path, encoding='utf-8') as f:
