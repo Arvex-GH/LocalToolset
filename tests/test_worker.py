@@ -52,6 +52,25 @@ class WorkerTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 worker.load_env_file(env)
 
+    def test_auto_request_runs_and_reports_result(self):
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {
+            'SUPABASE_URL': 'https://example.test', 'SUPABASE_SECRET_KEY': 'test-key',
+            'BRIDGE_CWD': directory,
+        }, clear=True):
+            job = {'id': 'test-id', 'command': 'echo linux-bridge-test'}
+            def fake_request(base, key, method, path, payload=None, prefer=None):
+                if method == 'POST':
+                    return [job]
+                self.assertEqual(method, 'PATCH')
+                self.assertEqual(payload['status'], 'completed')
+                self.assertEqual(payload['result']['exit_code'], 0)
+                self.assertIn('linux-bridge-test', payload['result']['stdout']['text'])
+                raise KeyboardInterrupt
+            with patch.object(worker, 'load_env_file'), patch.object(worker, 'request', side_effect=fake_request), \
+                 patch('builtins.input', side_effect=AssertionError('auto mode must not prompt')), \
+                 patch('sys.stdout'), self.assertRaises(KeyboardInterrupt):
+                worker.main(['--auto'])
+
     def test_auto_skips_prompt(self):
         with patch('builtins.input', side_effect=AssertionError('must not prompt')):
             self.assertTrue(worker.approved(True))

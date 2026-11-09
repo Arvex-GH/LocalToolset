@@ -10,6 +10,35 @@ This is a local, approval-gated worker, not a network server: it makes outbound 
 - Command text and output are stored in Supabase and visible to project administrators and service-role key holders. Don't run commands that print passwords, tokens, or sensitive files. Output is truncated to 32 KiB per stream before upload, but temporary files can consume disk while a command runs. Running commands can themselves write arbitrary amounts of data.
 - A timeout terminates the shell process but **does not guarantee its descendants are terminated**, especially on Windows. Commands can launch persistent processes; inspect them before approving.
 
+## Linux / Omarchy quick start
+
+Omarchy is Arch-based. Install Python 3.9+, Git, and Bash using your usual package manager if they are missing (for Arch-based systems: `sudo pacman -S --needed python git`). No Python package or root privileges are required to run shell and file operations. The worker uses `/bin/sh` for shell commands on Linux, so Windows-specific commands will not work; agents must send Linux-compatible commands. Check the full security guidance above before starting.
+
+1. Clone this repository and enter it:
+
+   ```bash
+   git clone https://github.com/Arvex-GH/UnrealEngine-Proto-1.git
+   cd UnrealEngine-Proto-1
+   ```
+
+2. Run the interactive setup in a terminal:
+
+   ```bash
+   python3 bridge/setup_linux.py
+   ```
+
+   It asks for the project URL, an existing absolute working directory and your Supabase secret key (input hidden). It creates `bridge/.env` with owner-only permissions and will **not overwrite** an existing file. The file is plaintext; Git ignores it, but protect it from other users, backups, and shell commands, and never send the key in chat. To change settings later, edit the file locally and restart the worker. Existing environment variables override values in the file. Alternatively use the manual `.env` setup below.
+
+3. Start it without root privileges:
+
+   ```bash
+   ./bridge/run-linux.sh
+   ```
+
+   Type uppercase `YES` for each request. After reviewing the risks, you can instead run `./bridge/run-linux.sh --auto` to execute **every** queued request without approval, including old pending requests. Stop with Ctrl+C. The launcher also works from another current directory when invoked with its full path. The configured `BRIDGE_CWD`, not the launch directory, is where commands run.
+
+Use only one worker on the queue at a time: there is no device targeting, so a worker on Windows or Linux can claim any request. If switching machines, stop the other worker first. The Linux setup has been tested on a generic Linux environment, not a real Omarchy desktop; a live Supabase and Unreal Editor test on your machine is still needed. For optional MCP on Arch/Omarchy, use a Python virtual environment (`python3 -m venv .venv`, activate it, then install `mcp>=1,<2`); install and configure a compatible Unreal MCP server separately. Never use `sudo` to run the bridge.
+
 ## Setup on your computer
 
 1. Install Python 3.9 or later. Download this repository/branch to your computer. File and shell operations require no Python packages; MCP support requires the optional SDK described below.
