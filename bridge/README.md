@@ -17,8 +17,8 @@ Omarchy is Arch-based. Install Python 3.9+, Git, and Bash using your usual packa
 1. Clone this repository and enter it:
 
    ```bash
-   git clone https://github.com/Arvex-GH/UnrealEngine-Proto-1.git
-   cd UnrealEngine-Proto-1
+   git clone https://github.com/Arvex-GH/LocalToolset.git
+   cd LocalToolset
    ```
 
 2. Run the interactive setup in a terminal:
