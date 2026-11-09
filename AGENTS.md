@@ -37,7 +37,7 @@ Use properly escaped SQL string literals or safe parameterization if the connect
 
 ## Request types
 
-Anything not beginning with the exact prefix `/bridge ` is executed as a shell command on the worker's operating system. Windows uses its default shell; PowerShell can be invoked explicitly. Structured requests are `/bridge ` followed by a JSON object:
+Anything not beginning with the exact prefix `/bridge ` is executed as a shell command on the worker's operating system. Windows uses its default shell; PowerShell can be invoked explicitly. On Linux/Omarchy commands run through `/bin/sh`; use Linux commands and do not assume Windows paths or PowerShell. Structured requests are `/bridge ` followed by a JSON object:
 
 ```text
 /bridge {"op":"read","path":"Source/example.cpp"}
@@ -52,7 +52,7 @@ Malformed structured requests fail rather than falling back to shell. File paths
 
 ## Local worker setup and operation
 
-The user installs Python 3.9+ and runs `bridge/worker.py` on their computer, with `SUPABASE_URL`, `SUPABASE_SECRET_KEY`, and optionally `BRIDGE_CWD` set locally in the ignored `bridge/.env` file or in the process environment (which takes precedence). Copy `bridge/.env.example` to `bridge/.env`; its values are plaintext and must remain private. `bridge/README.md` has OS-specific commands. The secret/service-role key is powerful and bypasses RLS: keep it in the private local environment or ignored `bridge/.env`, never in chat, Git, MCP configuration, or browser code. The file is plaintext and can be read by local processes with sufficient access. Only use a trusted, preferably dedicated, Supabase project.
+The user installs Python 3.9+ and runs `bridge/worker.py` on their computer, with `SUPABASE_URL`, `SUPABASE_SECRET_KEY`, and optionally `BRIDGE_CWD` set locally in the ignored `bridge/.env` file or in the process environment (which takes precedence). Copy `bridge/.env.example` to `bridge/.env`; its values are plaintext and must remain private. `bridge/README.md` has OS-specific commands. On Linux/Omarchy, `python3 bridge/setup_linux.py` creates the ignored private `.env` interactively, and `./bridge/run-linux.sh` starts the worker. The secret/service-role key is powerful and bypasses RLS: keep it in the private local environment or ignored `bridge/.env`, never in chat, Git, MCP configuration, or browser code. The file is plaintext and can be read by local processes with sufficient access. Only use a trusted, preferably dedicated, Supabase project.
 
 Default mode requires the user to type uppercase `YES` locally for **each** request. The user may explicitly start `py bridge/worker.py --auto` on Windows (or `python3 bridge/worker.py --auto` on macOS/Linux) to skip approvals for all queued actions. Auto mode runs existing pending requests too. Anyone with queue write access can control the computer with the worker's OS account privileges. It does not independently grant administrator privileges. Recommend a least-privileged account or VM and stopping the worker with Ctrl+C when not needed. Agent authority still comes from the user's request; auto mode is not permission to perform unrelated or destructive work. Confirm scope and obtain appropriate authorization for sensitive or irreversible operations.
 
