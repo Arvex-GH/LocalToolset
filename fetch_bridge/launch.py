@@ -10,6 +10,8 @@ call this file directly. It:
 4. prints the public URL, the token and one paste-ready agent line,
 5. runs the bridge in this console, and stops the tunnel when you hit Ctrl+C.
 
+Pass ``--new-token`` to only rotate the token in ``.env`` and print it.
+
 It runs the bridge with ``--auto`` by default: fetched operations execute without
 asking. Pass ``--approve`` to be prompted for ``YES`` on every request instead.
 
@@ -25,6 +27,7 @@ import re
 import secrets
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import tarfile
@@ -64,6 +67,15 @@ def ensure_env_token(env_path):
     Rewrites only that one line, so comments and other settings survive, and
     repeated launches keep the same token (and therefore the same URL).
     """
+    lines, token = _read_env(env_path)
+    if not server.valid_token(token):
+        token = secrets.token_urlsafe(32)
+    _write_env(env_path, lines, token)
+    return token
+
+
+def _read_env(env_path):
+    """Lines of .env without the token line, plus the token it held."""
     env_path = Path(env_path)
     lines, token = [], ''
     if env_path.exists():
@@ -73,13 +85,64 @@ def ensure_env_token(env_path):
                 token = value.strip().strip('"').strip("'")
                 continue
             lines.append(raw)
-    if not server.valid_token(token):
-        token = secrets.token_urlsafe(32)
-    lines.append('BRIDGE_TOKEN=' + token)
-    content = '\n'.join(lines) + '\n'
+    return lines, token
+
+
+def _write_env(env_path, lines, token):
+    """Put the token back, leaving every other line untouched."""
+    env_path = Path(env_path)
+    content = '\n'.join(list(lines) + ['BRIDGE_TOKEN=' + token]) + '\n'
     if not env_path.exists() or env_path.read_text(encoding='utf-8-sig') != content:
         env_path.write_text(content, encoding='utf-8')
-    return token
+
+
+def rotate_env_token(env_path):
+    """Replace the stored token with a fresh random one; (new, previous)."""
+    lines, previous = _read_env(env_path)
+    token = secrets.token_urlsafe(32)
+    _write_env(env_path, lines, token)
+    return token, previous
+
+
+def port_listening(port, host='127.0.0.1', timeout=0.3):
+    """True when something already accepts connections on that local port."""
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def rotate_token(env_path, say=print):
+    """Write a new token and show it, without starting a bridge or a tunnel."""
+    try:
+        token, previous = rotate_env_token(env_path)
+    except OSError as exc:
+        say(f'Cannot write {env_path}: {exc}')
+        return 1
+    copied = copy_to_clipboard(token)
+    try:
+        server.load_env_file(env_path)
+    except ValueError:
+        pass
+    port = int(os.environ.get('BRIDGE_PORT') or server.DEFAULT_PORT)
+    lines = [f'New token written to {env_path}', '',
+             f'  token : {token}', '',
+             'Paste this token to the agent; the tunnel URL does not change.']
+    if copied:
+        lines.insert(4, 'It is already on your clipboard.')
+    if port_listening(port):
+        lines += ['', f'A bridge is still listening on port {port}. Restart it (Ctrl+C,',
+                  'then start.cmd) so it accepts the new token; until then the old',
+                  'token still works.']
+        if previous:
+            lines += ['', 'The previous token stops working after that restart.']
+    else:
+        lines += ['', f'Nothing is listening on port {port}: start.cmd will use this token.']
+        if previous:
+            lines += ['', 'The previous token no longer works.']
+    say('\n'.join(lines))
+    return 0
 
 
 def download(url, destination, say=print):
@@ -276,10 +339,14 @@ def main(argv=None):
                         help='seconds to wait for the tunnel URL (default 30)')
     parser.add_argument('--port', type=int, default=None,
                         help=f'local port for the bridge (default {server.DEFAULT_PORT})')
+    parser.add_argument('--new-token', action='store_true',
+                        help='write a fresh random token to fetch_bridge/.env and exit')
     parser.add_argument('--cwd', default=None,
                         help='working directory for file operations (default: drive root)')
     args, forwarded = parser.parse_known_args(argv)
 
+    if args.new_token:
+        return rotate_token(HERE / '.env')
     if args.tunnel_binary:
         os.environ['BRIDGE_TUNNEL'] = args.tunnel_binary
     port = args.port or int(os.environ.get('BRIDGE_PORT') or server.DEFAULT_PORT)
