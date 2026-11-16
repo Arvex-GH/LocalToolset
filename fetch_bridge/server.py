@@ -773,9 +773,35 @@ Creating a job
   edit    path=... old=... new=...      (old must match exactly once)
   mkdir   path=...                      (single level; parent must exist)
   ls      path=... [count=1-500, default 100]
-  mcp.list [cursor=...]
-  mcp.call tool=... [args={"key":"value"}]
+  mcp.list [cursor=...]                  list tools; changes nothing
+  mcp.call tool=... [args={"key":"value"}]"""
 
+HELP_MCP = """
+
+MCP (drive an MCP server the user configured on this machine)
+  BRIDGE_MCP_CONFIG names one local JSON file describing ONE server:
+    {"command": "uvx", "args": ["mcp-for-blender"], "env": {}}
+  or, for a network transport,
+    {"transport": "streamable_http", "url": "http://HOST:PORT/mcp"}
+  (also "sse"). You cannot set it from here: the user edits fetch_bridge/.env and
+  restarts the bridge. Current state:
+__SUMMARY__
+  Usage: call mcp.list first. It returns every tool name with its input schema
+  and changes nothing. Then mcp.call tool=NAME&args={<json object>}; args must be
+  a JSON object, percent-encoded like any other value (%22 is a double quote).
+  Each call starts a fresh server process, initializes it, makes one call and
+  exits: budget seconds per call, and carry no state between calls.
+  The server runs on this machine with the user's privileges, exactly like shell.
+  A failed call is still a result: status=failed or isError=true arrives with the
+  reason in the body (unknown tool, server not running, timeout). Page long
+  replies with offset= as usual.
+  Worked example, Blender through the stdio server mcp-for-blender:
+    mcp.list                  -> get_scene_info, execute_blender_code, look, ...
+    mcp.call tool=get_scene_info
+    mcp.call tool=execute_blender_code&args={"code":"import bpy\\nprint(len(bpy.data.objects))"}
+"""
+
+HELP_TAIL = """
 Utilities (no job, no approval)
   ping, help, jobs [count=], cancel id=JOBID
 
@@ -792,6 +818,32 @@ Authorization and safety
   Send nonce=n=SOME-UNIQUE-VALUE to make retries safe: repeating a nonce returns
   the original job instead of executing twice.
 """
+
+
+def mcp_summary():
+    """One or two lines describing the configured MCP server, for /help.
+
+    Read from the config file rather than remembered at launch, so a stale
+    bridge still tells the truth about what the next caller will find.
+    """
+    path = os.environ.get('BRIDGE_MCP_CONFIG')
+    if not path:
+        return ('  not configured: BRIDGE_MCP_CONFIG is unset, so mcp.list and mcp.call\n'
+                '  will fail. Ask the user for a JSON config file and a restart.')
+    try:
+        with open(path, encoding='utf-8') as stream:
+            config = json.load(stream)
+    except (OSError, ValueError) as exc:
+        return f'  unusable: {path} ({exc})'
+    if not isinstance(config, dict):
+        return f'  unusable: {path} is not a JSON object'
+    transport = config.get('transport') or 'stdio'
+    if transport == 'stdio':
+        parts = [str(config.get('command') or '?')] + [str(arg) for arg in config.get('args') or []]
+        detail = 'stdio ' + ' '.join(parts)
+    else:
+        detail = f'{transport} {config.get("url", "?")}'
+    return f'  configured: {detail}\n  from: {path}'
 
 
 def help_text(settings):
@@ -816,7 +868,7 @@ Paths are relative to it and must resolve inside it. Text only, 1 MB per file.
 Safety
   Shell commands and MCP tools are NOT sandboxed. Only request what the user
   asked for, and never send secrets back in a URL or response.
-{HELP_FOOTER}"""
+{HELP_FOOTER}{HELP_MCP.replace("__SUMMARY__", mcp_summary())}{HELP_TAIL}"""
 
 
 class BridgeHandler(BaseHTTPRequestHandler):
