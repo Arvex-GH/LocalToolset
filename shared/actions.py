@@ -1,4 +1,10 @@
-"""Structured, approval-gated queue actions. No remote-controlled MCP configuration."""
+"""File and MCP helpers shared by both transports.
+
+Used by the archived Supabase worker (archive/supabase-bridge/worker.py) and
+by the fetch bridge (fetch_bridge/server.py). Path confinement, size caps,
+and MCP dispatch live here so the two transports cannot drift apart. No
+remote-controlled MCP configuration.
+"""
 import asyncio
 import json
 import os
@@ -22,14 +28,19 @@ def parse_command(command):
 
 
 def project_path(value, cwd=None):
-    if not isinstance(value, str) or not value or '\\x00' in value:
+    """Resolve a request path and require the result to stay inside cwd.
+
+    Both ``..`` traversal and symlinks that resolve outside the working
+    directory are rejected. ``resolve()`` follows links, so the containment
+    check applies to the real target rather than the requested spelling.
+    """
+    if not isinstance(value, str) or not value or '\x00' in value:
         raise ValueError('path must be a non-empty string')
-    p = Path(value)
-    if p.is_absolute():
-        result = p.resolve()
-    else:
-        base = Path(cwd).resolve() if cwd else Path.cwd()
-        result = (base / p).resolve()
+    base = Path(cwd).resolve() if cwd else Path.cwd().resolve()
+    entry = Path(value)
+    result = (entry if entry.is_absolute() else base / entry).resolve()
+    if result != base and base not in result.parents:
+        raise ValueError('path resolves outside the working directory')
     return result
 
 

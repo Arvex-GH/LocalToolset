@@ -1,4 +1,11 @@
-# Arena local command bridge (prototype)
+# Archived: Arena local command bridge (Supabase queue)
+
+> **Archived.** This transport is superseded by the fetch bridge in
+> `fetch_bridge/`, which needs no Supabase project, connector, or polling
+> worker. The code here still works and is still tested, but it is kept for
+> reference and for anyone who wants a durable server-side queue. Its file
+> and MCP helpers now live in `shared/actions.py`.
+
 
 This is a local, approval-gated worker, not a network server: it makes outbound HTTPS requests to a Supabase queue every 3 seconds by default. Arena can enqueue commands and read results using its Supabase connector. No Edge Functions are necessary. By default, a terminal on your computer must remain open to approve each command by typing `YES`. An explicitly enabled `--auto` mode skips approvals; see its security warning below. In addition to legacy shell commands, structured `/bridge` commands provide direct text file operations and an optional standard stdio MCP client. The worker launches the locally configured MCP server for each MCP request; configure and install an Unreal MCP implementation separately.
 
@@ -17,11 +24,11 @@ This is a local, approval-gated worker, not a network server: it makes outbound 
 3. Copy the example file to a private local `.env` file. In Windows PowerShell, from the repository root:
 
    ```powershell
-   Copy-Item bridge/.env.example bridge/.env
-   notepad bridge/.env
+   Copy-Item archive/supabase-bridge/.env.example archive/supabase-bridge/.env
+   notepad archive/supabase-bridge/.env
    ```
 
-   On macOS/Linux: `cp bridge/.env.example bridge/.env`, then open `bridge/.env` in a text editor. Fill in your Supabase **secret** key from Project Settings → API Keys and the absolute path to your project. The URL is prefilled for ArenaConnectMCP. For example:
+   On macOS/Linux: `cp archive/supabase-bridge/.env.example archive/supabase-bridge/.env`, then open `archive/supabase-bridge/.env` in a text editor. Fill in your Supabase **secret** key from Project Settings → API Keys and the absolute path to your project. The URL is prefilled for ArenaConnectMCP. For example:
 
    ```dotenv
    SUPABASE_URL=https://dtcdcdsnjvihzpzhijss.supabase.co
@@ -30,21 +37,21 @@ This is a local, approval-gated worker, not a network server: it makes outbound 
    ```
 
    This is a local plaintext file containing a powerful credential. Restrict filesystem access, backups, and sharing; `.gitignore` excludes it, but verify it is never force-added to Git or sent in chat. **Never paste the real key into this example, an issue, or the agent conversation.** Anyone or any command with access to the file or the worker's environment can read the key. Use a dedicated Supabase project and a least-privileged OS account or VM.
-4. From the repository root, start the worker (it automatically reads `bridge/.env` regardless of the current working directory):
+4. From the repository root, start the worker (it automatically reads `archive/supabase-bridge/.env` regardless of the current working directory):
 
    ```powershell
-   py bridge/worker.py
+   py archive/supabase-bridge/worker.py
    ```
 
-   On macOS/Linux: `python3 bridge/worker.py`. The file supports simple `KEY=value` lines and full-line `#` comments. Matching outer quotes are optional; values are literal (no variable expansion, backslash escaping, or inline comments). Existing environment variables override file values, including variables left over in an open terminal. You can also continue setting variables directly without a file. Restart the worker after editing the file.
+   On macOS/Linux: `python3 archive/supabase-bridge/worker.py`. The file supports simple `KEY=value` lines and full-line `#` comments. Matching outer quotes are optional; values are literal (no variable expansion, backslash escaping, or inline comments). Existing environment variables override file values, including variables left over in an open terminal. You can also continue setting variables directly without a file. Restart the worker after editing the file.
 
 To explicitly enable automatic execution instead of per-command approval, start the same worker with `--auto`:
 
 ```powershell
-py bridge/worker.py --auto
+py archive/supabase-bridge/worker.py --auto
 ```
 
-On macOS/Linux: `python3 bridge/worker.py --auto`. Auto mode lasts only for that process. Stop it with Ctrl+C; start without `--auto` to return to approval mode. **This bypasses approval for every shell, file, and MCP operation, including commands already pending.**
+On macOS/Linux: `python3 archive/supabase-bridge/worker.py --auto`. Auto mode lasts only for that process. Stop it with Ctrl+C; start without `--auto` to return to approval mode. **This bypasses approval for every shell, file, and MCP operation, including commands already pending.**
 
 The `.env` file persists on disk until you remove it; environment variables set in a shell persist until that shell exits. You can set `BRIDGE_POLL_SECONDS` (1–300, default 3) and `BRIDGE_TIMEOUT_SECONDS` (1–600, default 60). Stop the worker with Ctrl+C. Use only one worker unless you're intentionally sharing the queue: **there is no device targeting**, so any connected worker can claim any pending job.
 
