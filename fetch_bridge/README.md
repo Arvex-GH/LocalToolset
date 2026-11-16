@@ -188,6 +188,7 @@ the default. If you pass both flags, `--approve` wins.
 | `BRIDGE_WAIT_SECONDS` | `10` | how long a fetch waits inline, 1–25; keep it ≤10, fetch tools give up near 15 s |
 | `BRIDGE_RATE_LIMIT` | `120` | authenticated requests per minute |
 | `BRIDGE_REQUIRE_NONCE` | `0` | require `nonce=` on job-creating requests |
+| `BRIDGE_AUTH_FAILURE_LIMIT` | `20` | wrong tokens per minute before `429`; the real token is unaffected |
 | `BRIDGE_MCP_CONFIG` | unset | local JSON file, same format as `archive/supabase-bridge/README.md` |
 
 * File operations are UTF-8 text, 1 MB per file, writes default to create-only
@@ -216,6 +217,13 @@ the default. If you pass both flags, `--approve` wins.
   tunnel provider's logs, and the chat where you sent it. Rotate it by editing
   `BRIDGE_TOKEN` in `fetch_bridge/.env` and restarting; delete the file to get a
   brand-new one.
+* You may choose the token yourself, but it has to survive a URL path: 16–200
+  characters of `A-Z a-z 0-9 . _ ~ -`. Spaces, `?`, `#`, `&`, `/`, `%`, quotes and
+  non-ASCII are refused at startup — they would be parsed as URL syntax and every
+  request would fail with `401`. A memorable phrase is acceptable, a guessable
+  one is not: wrong tokens are answered with `401`, and after
+  `BRIDGE_AUTH_FAILURE_LIMIT` (default 20) in a minute with `429`, while the
+  correct token keeps working.
 * TLS ends at the tunnel provider, which can see command text and output. Use a
   provider you trust, or Tailscale Funnel / your own VPS, and never send
   passwords or keys through the bridge.
@@ -233,6 +241,8 @@ the default. If you pass both flags, `--approve` wins.
 | Symptom | Cause / fix |
 |---|---|
 | `401 unauthorized` | token missing or wrong, or you gave the agent an old URL |
+| `429 too many wrong tokens` | more than `BRIDGE_AUTH_FAILURE_LIMIT` bad tokens in a minute; wait or raise the limit |
+| token refused at startup | it contains a character that cannot travel in a URL path; use `A-Z a-z 0-9 . _ ~ -` |
 | `403` or an HTML page instead of `BRIDGE` | the tunnel's own interstitial (ngrok free) or a captive proxy |
 | `no tunnel URL after 30s` | outbound HTTPS blocked; retry with `--tunnel-timeout 60` and read `%TEMP%\arena-fetch-bridge\tunnel.log` |
 | `could not download cloudflared` | no GitHub access; install cloudflared yourself and pass `--tunnel-binary` |

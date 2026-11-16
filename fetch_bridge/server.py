@@ -30,6 +30,7 @@ import hmac
 import json
 import os
 from pathlib import Path
+import re
 import secrets
 import shutil
 import signal
@@ -63,7 +64,7 @@ ENV_KEYS = frozenset({
     'BRIDGE_TOKEN', 'BRIDGE_CWD', 'BRIDGE_HOST', 'BRIDGE_PORT',
     'BRIDGE_TIMEOUT_SECONDS', 'BRIDGE_WAIT_SECONDS', 'BRIDGE_STATE_DIR',
     'BRIDGE_MCP_CONFIG', 'BRIDGE_RATE_LIMIT', 'BRIDGE_REQUIRE_NONCE',
-    'BRIDGE_PUBLIC_URL',
+    'BRIDGE_PUBLIC_URL', 'BRIDGE_AUTH_FAILURE_LIMIT',
 })
 
 ALIASES = {'exec': 'shell', 'run': 'shell', 'sh': 'shell', 'cat': 'read', 'list': 'ls'}
@@ -96,6 +97,21 @@ REQUIRED_PARAMS = {
 }
 IMMEDIATE_OPS = frozenset({'ping', 'help', 'jobs', 'cancel'})
 WRITE_MODES = frozenset({'create', 'overwrite', 'append'})
+
+
+TOKEN_PATTERN = re.compile(r'^[A-Za-z0-9._~-]{16,200}$')
+
+
+def valid_token(token):
+    """True when a token can survive the URL path and is not reserved.
+
+    Space, "?", "#", "&", "/", "%", quotes and non-ASCII either change the
+    parsed path or need percent-encoding the caller will not produce, so they
+    are rejected up front rather than failing every request with 401.
+    """
+    return (isinstance(token, str) and bool(TOKEN_PATTERN.match(token))
+            and token not in RESERVED_TOKENS and token not in OP_PARAMS
+            and token not in ALIASES)
 
 
 class ParamError(ValueError):
@@ -242,7 +258,8 @@ def default_cwd():
 class Settings:
     def __init__(self, cwd, token, host='127.0.0.1', port=DEFAULT_PORT, timeout=60,
                  wait=10, state_dir=None, auto=False, rate_limit=120,
-                 require_nonce=False, generated_token=False, public_url=None):
+                 require_nonce=False, generated_token=False, public_url=None,
+                 auth_failure_limit=20):
         self.cwd = Path(cwd).resolve()
         self.token = token
         self.host = host
@@ -255,6 +272,7 @@ class Settings:
         self.require_nonce = require_nonce
         self.generated_token = generated_token
         self.public_url = public_url.rstrip('/') if public_url else None
+        self.auth_failure_limit = auth_failure_limit
 
     @classmethod
     def from_env(cls, cwd=None):
@@ -265,15 +283,18 @@ class Settings:
         generated = False
         if not token:
             token, generated = secrets.token_urlsafe(24), True
-        if token in RESERVED_TOKENS or token in OP_PARAMS or token in ALIASES \
-                or '/' in token or len(token) < 16:
-            raise ValueError('BRIDGE_TOKEN must be at least 16 characters, contain no "/", '
-                             'and not be a reserved word, operation name, or alias')
+        if not valid_token(token):
+            raise ValueError(
+                'BRIDGE_TOKEN must be 16-200 characters of A-Z a-z 0-9 . _ ~ - and not a '
+                'reserved word, operation name or alias. It is read from the URL path, so '
+                'spaces, "?", "#", "&", "/", "%", quotes and non-ASCII cannot match.')
         host = os.environ.get('BRIDGE_HOST', '127.0.0.1')
         port = _int(os.environ.get('BRIDGE_PORT'), 'BRIDGE_PORT', 0, 65_535)
         timeout = _int(os.environ.get('BRIDGE_TIMEOUT_SECONDS'), 'BRIDGE_TIMEOUT_SECONDS', 1, 600)
         wait = _int(os.environ.get('BRIDGE_WAIT_SECONDS'), 'BRIDGE_WAIT_SECONDS', 1, MAX_WAIT)
         rate = _int(os.environ.get('BRIDGE_RATE_LIMIT'), 'BRIDGE_RATE_LIMIT', 1, 10_000)
+        failures = _int(os.environ.get('BRIDGE_AUTH_FAILURE_LIMIT'),
+                        'BRIDGE_AUTH_FAILURE_LIMIT', 1, 10_000)
         require_nonce = _flag(os.environ.get('BRIDGE_REQUIRE_NONCE'), 'BRIDGE_REQUIRE_NONCE')
         return cls(cwd=cwd, token=token, host=host,
                    port=DEFAULT_PORT if port is None else port,
@@ -282,7 +303,8 @@ class Settings:
                    state_dir=os.environ.get('BRIDGE_STATE_DIR') or None,
                    rate_limit=120 if rate is None else rate,
                    require_nonce=require_nonce, generated_token=generated,
-                   public_url=os.environ.get('BRIDGE_PUBLIC_URL') or None)
+                   public_url=os.environ.get('BRIDGE_PUBLIC_URL') or None,
+                   auth_failure_limit=20 if failures is None else failures)
 
 
 def read_bounded(path, limit=MAX_CAPTURE_BYTES):
@@ -377,6 +399,8 @@ class Bridge:
         self.nonce_lock = threading.Lock()
         self.rate_lock = threading.Lock()
         self.rate_hits = []
+        self.auth_failures = []
+        self.auth_lock = threading.Lock()
         self.jobs_root = settings.state_dir / 'jobs'
         shutil.rmtree(self.jobs_root, ignore_errors=True)
         self.jobs_root.mkdir(parents=True, exist_ok=True)
@@ -390,6 +414,18 @@ class Bridge:
                 return False
             self.rate_hits.append(now)
             return True
+
+    def note_auth_failure(self):
+        """Record a wrong token; True when guessing should be throttled.
+
+        Only failures are counted and only failures are answered with 429, so a
+        flood of guesses cannot lock the real caller out of the bridge.
+        """
+        now = time.monotonic()
+        with self.auth_lock:
+            self.auth_failures = [stamp for stamp in self.auth_failures if now - stamp < 60]
+            self.auth_failures.append(now)
+            return len(self.auth_failures) > self.settings.auth_failure_limit
 
     def nonce_check(self, nonce):
         """Return an existing job id for a replayed nonce, or register it.
@@ -901,6 +937,9 @@ class BridgeHandler(BaseHTTPRequestHandler):
         bearer = authorization[7:].strip() if authorization.lower().startswith('bearer ') else ''
         supplied = token or bearer
         if not supplied or not hmac.compare_digest(str(supplied), settings.token):
+            if bridge.note_auth_failure():
+                return (429, 'error: too many wrong tokens; wait a minute before trying again.',
+                        'text/plain; charset=utf-8', 'auth-throttled')
             return (401, 'error: unauthorized. Fetch /x/<token>/<op> with the token from the server '
                          'terminal, or send Authorization: Bearer <token>.',
                     'text/plain; charset=utf-8', 'unauthorized')
@@ -997,9 +1036,9 @@ def main(argv=None):
     except ValueError as exc:
         sys.exit(str(exc))
     if args.token:
+        if not valid_token(args.token):
+            sys.exit('--token must be 16-200 characters of A-Z a-z 0-9 . _ ~ - and not a reserved word.')
         settings.token, settings.generated_token = args.token, False
-        if len(args.token) < 16 or args.token in RESERVED_TOKENS or '/' in args.token:
-            sys.exit('--token must be at least 16 characters, contain no "/", and not be a reserved word.')
     if args.host:
         settings.host = args.host
     if args.port is not None:

@@ -59,7 +59,7 @@ def tunnel_asset(system=None, machine=None):
 
 
 def ensure_env_token(env_path):
-    """Read BRIDGE_TOKEN from .env, generating and storing one if absent.
+    """Read BRIDGE_TOKEN from .env, generating and storing one if absent or unusable.
 
     Rewrites only that one line, so comments and other settings survive, and
     repeated launches keep the same token (and therefore the same URL).
@@ -73,7 +73,7 @@ def ensure_env_token(env_path):
                 token = value.strip().strip('"').strip("'")
                 continue
             lines.append(raw)
-    if len(token) < 16 or '/' in token:
+    if not server.valid_token(token):
         token = secrets.token_urlsafe(32)
     lines.append('BRIDGE_TOKEN=' + token)
     content = '\n'.join(lines) + '\n'
