@@ -11,7 +11,7 @@ through a tunnel you choose, or polls a queue you own.
 | Wake-up | listener is already waiting | local worker polls every 3 s |
 | Result | returned in the same HTTP response | stored in a column, read separately |
 | Keeps history across restarts | no (in-memory jobs) | yes |
-| Setup | one Python file, one tunnel | schema, wait SQL, `.env`, worker |
+| Setup | double-click `fetch_bridge\start.cmd` | schema, wait SQL, `.env`, worker |
 
 Both expose the same capabilities — shell commands, text file read/write/edit,
 directory listing, and an optional stdio/HTTP MCP client (for example an Unreal

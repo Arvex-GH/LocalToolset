@@ -15,7 +15,8 @@ This repository contains two transports that let a cloud agent run work on a use
 
 The agent fetches an authenticated URL on a listener running on the user's computer; the server executes the operation and returns the result in the same response. Reachability comes from a tunnel the user's PC dials out to (Cloudflare, Tailscale Funnel, ngrok, or a VPS), so there is no inbound port and the sandbox needs no public address.
 
-- Files: `fetch_bridge/server.py` (stdlib only, except the optional MCP SDK), `fetch_bridge/README.md` (setup, tunnel options, URL cookbook, limits, security), `fetch_bridge/.env.example`, `fetch_bridge/prompt.md` (paste-in agent prompt).
+- Files: `fetch_bridge/server.py` (stdlib only, except the optional MCP SDK), `fetch_bridge/launch.py` + `start.cmd`/`start.sh` (one-click launcher: token, cloudflared download, tunnel, banner), `fetch_bridge/README.md` (setup, tunnel options, URL cookbook, limits, security), `fetch_bridge/.env.example`, `fetch_bridge/prompt.md` (paste-in agent prompt).
+- The launcher prints the public URL, the token and a paste-ready `/x/<token>/help` line; Ctrl+C stops both the bridge and the tunnel. The working directory defaults to the root of the installation's drive (`C:\` on Windows) and can be narrowed with `--cwd`/`BRIDGE_CWD`.
 - The user must give the agent the base URL and token; neither exists in this repository. They are bearer credentials, and the token appears in the chat where it was shared — never echo it back, and suggest restarting with a new `BRIDGE_TOKEN` to revoke it.
 - **Fetch `/x/<token>/help` first.** It is the authoritative, live protocol: working directory, operations, escaping rules, paging, statuses. Do not assume parameter names from this file if the server's help disagrees.
 - Shape: `<public base>/x/<token>/<op>?<params>`, e.g. `/x/<token>/shell?cmd=git%20status&wait=20`.

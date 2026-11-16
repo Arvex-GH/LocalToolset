@@ -10,7 +10,7 @@ worker: one authenticated endpoint, one request, one answer.
  fetch https://xyz.trycloudflare.com/x/TOKEN/shell?cmd=dir
         │                                          ▲
         └──► tunnel (TLS, dials out) ──────────────┘
-                                                   fetch_bridge/server.py
+                                                   start.cmd → fetch_bridge/launch.py
                                                    └─ approve? → run → reply
         ◄── BRIDGE v1 status=completed exit=0 + output
 ```
@@ -19,139 +19,104 @@ The tunnel connection is opened *by your PC*, so there is no public IP, no port
 forwarding and no inbound hole on either side. The agent only needs a tool that
 can fetch a URL — no custom headers, no POST, no signing.
 
-## Why this exists next to the archived queue bridge
+## Start it: double-click `start.cmd`
 
-| | Supabase queue (`archive/supabase-bridge/`, archived) | Fetch bridge (`fetch_bridge/`) |
-|---|---|---|
-| Transport | row in `arena_bridge_commands` | query string of a fetched URL |
-| Wake-up | worker polls every 3 s | server already listening |
-| Authentication | service-role key (bypasses RLS) | bearer token in the URL path |
-| Result | `result` JSON column, read separately | returned in the same HTTP response |
-| Waiting | `arena_bridge_wait(id, 15)` | `job?id=...&wait=20` on the same listener |
-| Needs in the cloud | Supabase project + connector | nothing |
-| Survives restarts | rows persist | jobs are in memory |
+Windows: double-click **`fetch_bridge\start.cmd`**. macOS/Linux: `./start.sh`.
 
-Use the queue when you want a durable audit trail or jobs that can run while no
-agent is in a turn. Use this when you want zero cloud setup and one round trip.
+One click does everything, in this order:
 
-## 1. Start the server
+1. Creates `fetch_bridge/.env` with a stable `BRIDGE_TOKEN` if there is none
+   (an existing token is reused, so the URL you already shared keeps working).
+2. Downloads `cloudflared` into `fetch_bridge/bin/` on first run (about 35 MB;
+   skipped afterwards, and the folder is git-ignored).
+3. Opens a Cloudflare quick tunnel to `127.0.0.1:8765`.
+4. Prints a banner with the public URL, the token, the working directory, and
+   **one paste-ready line to give the agent** (also copied to your clipboard on
+   Windows and macOS):
 
-Python 3.9+, no third-party packages (MCP support is the optional exception).
-From the repository root:
+   ```
+   ====================================================================
+     Fetch bridge is up. Ctrl+C stops the bridge and the tunnel.
+   ====================================================================
+     public URL : https://plain-cities-argue.trycloudflare.com
+     token      : 9xQ2…48 characters…
+     working dir: C:\
 
-```powershell
-# Windows PowerShell
-$env:BRIDGE_TOKEN = -join ((48..57) + (97..102) | Get-Random -Count 32 | ForEach-Object {[char]$_})
-$env:BRIDGE_CWD = "C:\Users\You\MyProject"
-py fetch_bridge/server.py
-```
+     GIVE THE AGENT THIS LINE:
+     https://plain-cities-argue.trycloudflare.com/x/9xQ2…/help
+   ```
 
-```bash
-# macOS / Linux
-export BRIDGE_TOKEN=$(python3 -c "import secrets; print(secrets.token_hex(24))")
-export BRIDGE_CWD="$HOME/MyProject"
-python3 fetch_bridge/server.py
-```
+5. Runs the bridge in that same window.
 
-Or keep the settings in a private local file: copy `fetch_bridge/.env.example`
-to `fetch_bridge/.env` and edit it (it is git-ignored). The server reads that
-file automatically, and real environment variables win over it.
+**Ctrl+C stops both** the bridge and the tunnel; the launcher terminates
+cloudflared even if the console is closed. The tunnel URL changes every time you
+start, the token does not.
 
-The server prints:
-
-```
-Fetch bridge v1 listening on http://127.0.0.1:8765
-  working directory: /home/you/MyProject
-  token: 3f0c…(32+ characters)
-  agent URL: http://127.0.0.1:8765/x/3f0c…/help
-```
-
-Keep it bound to loopback (the default). The tunnel connects to it locally.
-
-By default **every operation waits for you to type `YES`** in that terminal.
-`--auto` removes that barrier — read the security section before using it.
-
-## 2. Expose it with a tunnel
-
-Pick one. Two terminals: one for the server, one for the tunnel.
-
-### Cloudflare quick tunnel — recommended first try
-
-Free, no account, prints an HTTPS URL immediately.
+The working directory defaults to the **root of the drive the toolset lives on —
+`C:\` on Windows** — so file operations work anywhere on the system drive
+without configuration. Narrow it with `--cwd` or `BRIDGE_CWD` when you want file
+reads and writes confined to one project:
 
 ```powershell
-winget install --id Cloudflare.cloudflared      # Windows
+fetch_bridge\start.cmd --cwd "C:\Users\me\Documents\Unreal Projects\MyProject"
+```
+
+Other launcher options (anything else is passed to `server.py`):
+
+| Flag | Effect |
+|---|---|
+| `--auto` | run fetched operations without asking `YES` (see the warning below) |
+| `--port 9000` | listen on another port |
+| `--no-tunnel` | local only, no cloudflared: prints a `127.0.0.1` URL |
+| `--tunnel-binary PATH` | use a specific cloudflared instead of downloading one |
+| `--tunnel-timeout 60` | wait longer for the tunnel URL (default 30 s) |
+
+First-run notes: Windows may challenge `cloudflared.exe` with SmartScreen
+(More info → Run anyway), and it needs Python 3.9+ on `PATH` (`start.cmd` checks
+and tells you if it is missing). A quick-tunnel hostname can take a few seconds
+to resolve the very first time.
+
+## Wiring it up by hand
+
+You do not need this if `start.cmd` worked, but the pieces are independent:
+
+```powershell
+# 1. token + working directory, in fetch_bridge\.env
+"BRIDGE_TOKEN=$(py -c \"import secrets;print(secrets.token_urlsafe(32))\")`nBRIDGE_CWD=C:\" |
+  Set-Content "fetch_bridge\.env"
+
+# 2. the bridge (its own window)
+py fetch_bridge\server.py
+
+# 3. a tunnel to it (its own window); copy the https hostname it prints
 cloudflared tunnel --url http://127.0.0.1:8765
 ```
 
-```bash
-brew install cloudflared                        # macOS
-cloudflared tunnel --url http://127.0.0.1:8765  # Linux: use the .deb/.rpm or the release binary
-```
+`server.py` performs no tunnel management and prints only local URLs;
+`launch.py` is the piece that adds cloudflared, the token file and the
+paste-ready banner. Without `BRIDGE_TOKEN` the server generates a fresh token on
+every start, which invalidates URLs you have handed out.
 
-The banner contains the address to use:
+### Choosing a tunnel
 
-```
-Your quick Tunnel has been created! Visit it at:
-https://random-words-here.trycloudflare.com
-```
+| Tunnel | Good | Watch out |
+|---|---|---|
+| **Cloudflare quick** (`launch.py` uses this) | free, no account, instant | random hostname each start, slow first resolve |
+| **Cloudflare named** | stable hostname on your domain | needs account + domain |
+| **Tailscale Funnel** (`tailscale funnel 8765`) | traffic path stays in your tailnet | enable Funnel in the admin console |
+| **ngrok** | reserved domain on the free tier | free tier can answer with an HTML interstitial a fetch tool cannot click |
 
-The hostname changes every restart, and random hostnames can be slow to resolve
-the first time. For a stable name, use a named Cloudflare tunnel with a domain
-you own, or one of the options below.
-
-### Tailscale Funnel — no third-party proxy reading your traffic
+Check any tunnel before involving the agent:
 
 ```bash
-tailscale funnel 8765     # → https://machine.tailnet-name.ts.net/
+curl https://your-host/health          # → ok
+curl https://your-host/x/<token>/help  # → the protocol card
 ```
 
-Needs Funnel enabled for the tailnet in the admin console. The endpoint is
-reachable by anyone with the URL, but the traffic path stays in Tailscale.
+`/health` needs no token. Do **not** bind `0.0.0.0` or forward a router port
+instead of using a tunnel — the token would travel in cleartext.
 
-### ngrok
-
-```bash
-ngrok config add-authtoken <your-token>
-ngrok http 8765
-```
-
-Useful, with one caveat: the free tier can answer browser-shaped requests with
-an HTML "you are about to visit" interstitial instead of forwarding them. An
-agent's fetch tool cannot click through it and has no cookie jar. A reserved
-domain (`ngrok http --domain=you.ngrok-free.app 8765`) usually avoids it.
-
-### Other options
-
-`npx localtunnel --port 8765`, `bore local 8765 --to bore.pub`, `zrok share
-public`, or an SSH reverse tunnel to a VPS you control
-(`ssh -R 80:127.0.0.1:8765 you@your-vps`). Anything that gives you a public
-HTTPS URL forwarding to `127.0.0.1:8765` works.
-
-### Check it before involving the agent
-
-```bash
-curl https://random-words-here.trycloudflare.com/health          # → ok
-curl https://random-words-here.trycloudflare.com/x/<token>/help  # → protocol card
-```
-
-`/health` needs no token, so it also proves the tunnel without exposing
-anything. Do **not** bind `0.0.0.0` or forward the router port instead of using
-a tunnel — the token would travel in cleartext.
-
-## 3. Hand the URL to the agent
-
-Give it the base URL and the token, e.g.
-`https://random-words-here.trycloudflare.com/x/<token>/help`, and ask it to
-fetch that first so it learns the protocol. `fetch_bridge/prompt.md` is a
-ready-to-paste prompt.
-
-Both parts are bearer credentials — anything that has the URL and token can run
-commands as you (subject to your approval gate). Restart the server with a new
-`BRIDGE_TOKEN` to revoke a URL you have shared. Stop the tunnel and server when
-you are done.
-
-## 4. What the agent can ask for
+## What the agent can ask for
 
 ```text
 GET /x/<token>/help                                   protocol card (fetch this first)
@@ -189,28 +154,26 @@ output attached — read the body, not the status code.
 
 ## Approval, approval timeouts, and `--auto`
 
-Default mode asks you to type `YES` for **every** operation, including reads.
-The agent's fetch stays open for `BRIDGE_WAIT_SECONDS` (default 15) while you
-decide:
+Default mode asks you to type `YES` for **every** operation, including reads —
+right in the window `start.cmd` opened. The agent's fetch stays open for
+`BRIDGE_WAIT_SECONDS` (default 15) while you decide:
 
 * you answer in time → the result comes back in that same response;
 * you are slower → the response says `status=awaiting_approval` and the job
-  keeps waiting for you; the agent refetches `job?id=<id>` and picks up the
-  result once you approve;
-* you type anything else, or stdin is closed → the job is `rejected`, and
-  nothing runs.
+  keeps waiting; the agent refetches `job?id=<id>` and picks up the result once
+  you approve;
+* you type anything else, or stdin is closed → the job is `rejected`, nothing runs.
 
-`--auto` skips the prompt. Anyone who knows the URL and token can then run
-anything as your user, including reading credentials and exfiltrating files.
-Use a dedicated Supabase-free VM or a least-privileged OS account if you enable
-it, and only on a URL you keep private. Existing queued jobs are unaffected;
-auto mode applies to the running process only.
+`start.cmd --auto` skips the prompt. Anyone who knows the URL and token can then
+run anything as your user, including reading credentials and exfiltrating files.
+Use it only on a URL you keep private, ideally with a least-privileged account
+or a VM. Auto mode applies to the running process only.
 
 ## Limits and behaviour
 
 | Setting | Default | Notes |
 |---|---|---|
-| `BRIDGE_CWD` | current directory | every file path must resolve inside it |
+| `BRIDGE_CWD` | drive root (`C:\`) | every file path must resolve inside it; `--cwd` overrides |
 | `BRIDGE_PORT` / `BRIDGE_HOST` | `8765` / `127.0.0.1` | keep it loopback |
 | `BRIDGE_TIMEOUT_SECONDS` | `60` | per shell/MCP job, 1–600; `timeout=` overrides |
 | `BRIDGE_WAIT_SECONDS` | `15` | how long a fetch waits inline, 1–25 |
@@ -226,19 +189,21 @@ auto mode applies to the running process only.
 * Only the last 100 jobs are kept; `job?id=` for an evicted or pre-restart id
   returns 404. Jobs never survive a restart.
 * Shell and MCP work is **not** sandboxed: the working directory is a starting
-  point, not a boundary. A timeout kills the process group where the OS allows
-  it, which is best-effort, especially on Windows.
+  point, not a boundary. With the default `C:\` that applies to the whole system
+  drive. A timeout kills the process group where the OS allows it, which is
+  best-effort, especially on Windows.
 * `nonce=<unique>` makes retries safe: repeating the same nonce returns the
   original job instead of running the command twice.
 * MCP is the same stdio/Streamable-HTTP/SSE client documented in
-  `archive/supabase-bridge/README.md`; a new server process is started per request, so stateful
-  Unreal plugins may not work.
+  `archive/supabase-bridge/README.md`; a new server process is started per
+  request, so stateful Unreal plugins may not work.
 
 ## Security
 
 * The token is a bearer credential in a URL. It lands in your terminal, the
-  tunnel provider's logs, and the chat where you sent it. Rotate it by
-  restarting with a different `BRIDGE_TOKEN`.
+  tunnel provider's logs, and the chat where you sent it. Rotate it by editing
+  `BRIDGE_TOKEN` in `fetch_bridge/.env` and restarting; delete the file to get a
+  brand-new one.
 * TLS ends at the tunnel provider, which can see command text and output. Use a
   provider you trust, or Tailscale Funnel / your own VPS, and never send
   passwords or keys through the bridge.
@@ -253,14 +218,17 @@ auto mode applies to the running process only.
 
 ## Troubleshooting
 
-| Symptom | Cause |
+| Symptom | Cause / fix |
 |---|---|
-| `401 unauthorized` | token missing from the path, or the tunnel URL changed |
-| `403`/HTML page instead of `BRIDGE` | the tunnel's own interstitial (ngrok free) or a captive proxy |
+| `401 unauthorized` | token missing or wrong, or you gave the agent an old URL |
+| `403` or an HTML page instead of `BRIDGE` | the tunnel's own interstitial (ngrok free) or a captive proxy |
+| `no tunnel URL after 30s` | outbound HTTPS blocked; retry with `--tunnel-timeout 60` and read `%TEMP%\arena-fetch-bridge\tunnel.log` |
+| `could not download cloudflared` | no GitHub access; install cloudflared yourself and pass `--tunnel-binary` |
+| Python not found on double-click | install Python 3.9+ with "Add python.exe to PATH", or run `py fetch_bridge\launch.py` |
+| working dir is not `C:\` | a stale `BRIDGE_CWD` line in `fetch_bridge/.env`; delete it |
+| `status=awaiting_approval` every time | nobody typed `YES` in the launcher window |
 | `404 unknown operation` | op name typo; fetch `/help` for the list |
-| `400 unknown parameter` | a parameter the op does not accept; the error lists valid ones |
-| `status=awaiting_approval` every time | nothing is typed in the server terminal |
-| fetches feel slow the first time | quick-tunnel hostname resolution; a named tunnel avoids it |
+| `400 unknown parameter` | the error lists the parameters that op accepts |
 | `429 rate limit` | more than `BRIDGE_RATE_LIMIT` authenticated requests in a minute |
 
 ## Tests
@@ -271,5 +239,6 @@ python -m unittest discover -s tests -v
 
 `tests/test_fetch_bridge.py` starts real listeners on loopback and drives them
 over HTTP: authorization, escaping, paging, timeouts, cancellation, nonce
-replay, approval/rejection, JSON envelopes, POST, rate limiting, and the MCP
-wiring (with a stubbed transport, so no MCP SDK is needed).
+replay, approval/rejection, JSON envelopes, POST, rate limiting, MCP wiring, the
+launcher's token file and URL scraping, and the drive-root default. No network
+access is needed.
