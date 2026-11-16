@@ -46,7 +46,8 @@ One click does everything, in this order:
      https://plain-cities-argue.trycloudflare.com/x/9xQ2…/help
    ```
 
-5. Runs the bridge in that same window.
+5. Runs the bridge in that same window — **in auto mode**, so fetched operations
+   run without asking. Add `--approve` if you want to type `YES` for each one.
 
 **Ctrl+C stops both** the bridge and the tunnel; the launcher terminates
 cloudflared even if the console is closed. The tunnel URL changes every time you
@@ -65,7 +66,7 @@ Other launcher options (anything else is passed to `server.py`):
 
 | Flag | Effect |
 |---|---|
-| `--auto` | run fetched operations without asking `YES` (see the warning below) |
+| `--approve` | ask `YES` for every request instead of running it automatically |
 | `--port 9000` | listen on another port |
 | `--no-tunnel` | local only, no cloudflared: prints a `127.0.0.1` URL |
 | `--tunnel-binary PATH` | use a specific cloudflared instead of downloading one |
@@ -152,22 +153,30 @@ hello from your machine
 `failed`, `rejected`, `cancelled`. A failed command is still HTTP 200 with the
 output attached — read the body, not the status code.
 
-## Approval, approval timeouts, and `--auto`
+## Modes: auto by default, `--approve` to gate each request
 
-Default mode asks you to type `YES` for **every** operation, including reads —
-right in the window `start.cmd` opened. The agent's fetch stays open for
-`BRIDGE_WAIT_SECONDS` (default 15) while you decide:
+Double-clicking starts the bridge with `--auto`: fetched operations run
+immediately, with no prompt. That is what makes unattended use work — and it
+means **anyone holding the URL and token can run anything as you**. The banner
+says so every time it starts.
+
+To vet each request instead, start it with `--approve`:
+
+```powershell
+C:\Users\you\Documents\LocalToolset\fetch_bridge\start.cmd --approve
+```
+
+In approval mode the agent's fetch stays open for `BRIDGE_WAIT_SECONDS`
+(default 10) while you decide:
 
 * you answer in time → the result comes back in that same response;
-* you are slower → the response says `status=awaiting_approval` and the job
-  keeps waiting; the agent refetches `job?id=<id>` and picks up the result once
-  you approve;
-* you type anything else, or stdin is closed → the job is `rejected`, nothing runs.
+* you are slower → the response says `status=awaiting_approval` and the job keeps
+  waiting; the agent refetches `job?id=<id>` and picks the result up once you
+  approve. It never executes twice;
+* you type anything other than `YES`, or stdin is closed → `rejected`, nothing runs.
 
-`start.cmd --auto` skips the prompt. Anyone who knows the URL and token can then
-run anything as your user, including reading credentials and exfiltrating files.
-Use it only on a URL you keep private, ideally with a least-privileged account
-or a VM. Auto mode applies to the running process only.
+`server.py` run on its own still defaults to approval; only the launcher flips
+the default. If you pass both flags, `--approve` wins.
 
 ## Limits and behaviour
 
@@ -176,7 +185,7 @@ or a VM. Auto mode applies to the running process only.
 | `BRIDGE_CWD` | drive root (`C:\`) | every file path must resolve inside it; `--cwd` overrides |
 | `BRIDGE_PORT` / `BRIDGE_HOST` | `8765` / `127.0.0.1` | keep it loopback |
 | `BRIDGE_TIMEOUT_SECONDS` | `60` | per shell/MCP job, 1–600; `timeout=` overrides |
-| `BRIDGE_WAIT_SECONDS` | `15` | how long a fetch waits inline, 1–25 |
+| `BRIDGE_WAIT_SECONDS` | `10` | how long a fetch waits inline, 1–25; keep it ≤10, fetch tools give up near 15 s |
 | `BRIDGE_RATE_LIMIT` | `120` | authenticated requests per minute |
 | `BRIDGE_REQUIRE_NONCE` | `0` | require `nonce=` on job-creating requests |
 | `BRIDGE_MCP_CONFIG` | unset | local JSON file, same format as `archive/supabase-bridge/README.md` |
@@ -200,6 +209,9 @@ or a VM. Auto mode applies to the running process only.
 
 ## Security
 
+* **The launcher defaults to auto mode.** Anyone with the URL and token can run
+  anything as your user, with no prompt. Use `--approve`, keep the token private,
+  and Ctrl+C the bridge when you are not using it.
 * The token is a bearer credential in a URL. It lands in your terminal, the
   tunnel provider's logs, and the chat where you sent it. Rotate it by editing
   `BRIDGE_TOKEN` in `fetch_bridge/.env` and restarting; delete the file to get a
@@ -227,6 +239,9 @@ or a VM. Auto mode applies to the running process only.
 | Python not found on double-click | install Python 3.9+ with "Add python.exe to PATH", or run `py fetch_bridge\launch.py` |
 | working dir is not `C:\` | a stale `BRIDGE_CWD` line in `fetch_bridge/.env`; delete it |
 | `status=awaiting_approval` every time | nobody typed `YES` in the launcher window |
+| fetches hang and then fail around 15 s | the fetch tool's own timeout; use `wait=10` or less, or `detach=1` and poll `job?id=` |
+| commands run without asking | the launcher's default; restart with `--approve` |
+| `/help` shows the tunnel hostname | expected when launched by `start.cmd`; a bare `server.py` shows `127.0.0.1` |
 | `404 unknown operation` | op name typo; fetch `/help` for the list |
 | `400 unknown parameter` | the error lists the parameters that op accepts |
 | `429 rate limit` | more than `BRIDGE_RATE_LIMIT` authenticated requests in a minute |

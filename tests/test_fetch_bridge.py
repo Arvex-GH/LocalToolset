@@ -553,6 +553,47 @@ class LauncherTests(unittest.TestCase):
         self.assertIn('GIVE THE AGENT THIS LINE', text)
         self.assertNotIn('clipboard', text)
 
+    def test_banner_states_the_mode(self):
+        auto = launch.banner('https://abc.test', 't' * 20, 'C:\\', True)
+        self.assertIn('AUTO - every request runs immediately', auto)
+        self.assertIn('Restart with --approve', auto)
+        self.assertIn('copied to your clipboard', auto)
+        approve = launch.banner('https://abc.test', 't' * 20, 'C:\\', False, 'approve')
+        self.assertIn('APPROVAL - type YES for every request', approve)
+        self.assertNotIn('Restart with --approve', approve)
+
+    def run_launcher(self, extra):
+        captured = {}
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(launch, 'HERE', Path(directory)), \
+                patch.object(launch.server, 'main', lambda argv: captured.update(argv=argv)):
+            self.assertEqual(launch.main(['--no-tunnel'] + extra), 0)
+        return captured['argv']
+
+    def test_launcher_runs_auto_by_default(self):
+        argv = self.run_launcher([])
+        self.assertIn('--auto', argv)
+
+    def test_approve_flag_withholds_auto(self):
+        for extra in (['--approve'], ['--approve', '--auto']):
+            with self.subTest(extra=extra):
+                self.assertNotIn('--auto', self.run_launcher(extra))
+
+    def test_launcher_injects_the_port_once(self):
+        argv = self.run_launcher(['--port', '9555'])
+        self.assertEqual(argv.count('--port'), 1)
+        self.assertEqual(argv[argv.index('--port') + 1], '9555')
+
+    def test_launcher_writes_its_token_file_and_keeps_the_mode_out_of_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch.object(launch, 'HERE', root), \
+                    patch.object(launch.server, 'main', lambda argv: None):
+                launch.main(['--no-tunnel'])
+            token = (root / '.env').read_text().strip()
+            self.assertTrue(token.startswith('BRIDGE_TOKEN='))
+            self.assertNotIn('auto', token.lower())
+
     def test_clipboard_never_passes_stdin_and_input_together(self):
         """Regression: Windows raised ValueError here and killed the launch."""
         calls = {}
@@ -586,6 +627,34 @@ class LauncherTests(unittest.TestCase):
         finished = subprocess.Popen([sys.executable, '-c', 'pass'])
         finished.wait(10)
         launch.stop_tunnel(finished)
+
+
+class HelpAndWaitTests(unittest.TestCase):
+    def settings(self, **overrides):
+        options = dict(cwd='.', token='x' * 20, public_url=None)
+        options.update(overrides)
+        return fetch_server.Settings(**options)
+
+    def test_help_advertises_the_public_origin_when_known(self):
+        text = fetch_server.help_text(self.settings(public_url='https://words.trycloudflare.com/'))
+        self.assertIn('GET https://words.trycloudflare.com/x/<token>/<op>', text)
+        self.assertNotIn('127.0.0.1', text)
+        local = fetch_server.help_text(self.settings())
+        self.assertIn('GET http://127.0.0.1:8765/x/<token>/<op>', local)
+
+    def test_help_warns_about_the_fetch_timeout(self):
+        text = fetch_server.help_text(self.settings())
+        self.assertIn('wait=10 or less', text)
+
+    def test_inline_wait_defaults_to_ten_seconds(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(fetch_server.Settings.from_env().wait, 10)
+        with patch.dict(os.environ, {'BRIDGE_WAIT_SECONDS': '20'}, clear=True):
+            self.assertEqual(fetch_server.Settings.from_env().wait, 20)
+
+    def test_public_url_comes_from_the_environment(self):
+        with patch.dict(os.environ, {'BRIDGE_PUBLIC_URL': 'https://abc.test/'}, clear=True):
+            self.assertEqual(fetch_server.Settings.from_env().public_url, 'https://abc.test')
 
 
 class DefaultDirectoryTests(unittest.TestCase):
