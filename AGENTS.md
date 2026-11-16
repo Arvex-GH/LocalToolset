@@ -64,6 +64,18 @@ The worker has an optional standard **stdio MCP client**, not a built-in Unreal 
 
 Once configured, send `mcp.list` to discover actual tools and schemas before sending `mcp.call`; don't invent tool names or assume the bridge has been connected to Unreal. Each request launches a new MCP server/session, so servers requiring persistent session state may not work. A timeout does not guarantee Unreal-side work was cancelled; inspect before retrying. File, shell, and MCP operations all bypass local approval in `--auto` mode.
 
+## Fetch bridge (alternative transport)
+
+`fetch_bridge/` is a second, independent transport for the same capability. Instead of a Supabase queue it runs an authenticated HTTP listener on the user's computer, and the agent's own URL-fetch call is the request: the URL carries the operation and the HTTP response body carries the result. No Supabase project, connector, database, or polling worker is involved, and the user's machine opens an outbound tunnel rather than accepting inbound connections.
+
+- Files: `fetch_bridge/server.py` (stdlib only, except the optional MCP SDK), `fetch_bridge/README.md` (setup, tunnel options, URL cookbook, security), `fetch_bridge/.env.example`, `fetch_bridge/prompt.md` (paste-in agent prompt). File and MCP helpers are shared with `bridge/actions.py`.
+- Address shape: `<public base>/x/<token>/<op>?<params>`, for example `/x/<token>/shell?cmd=git%20status&wait=20`. The agent must be given the base URL and token by the user; they are bearer credentials and do not exist in this repository.
+- Operations: `shell`, `read`, `write` (create/overwrite/append), `edit`, `mkdir`, `ls`, `mcp.list`, `mcp.call`, plus `ping`, `help`, `job`, `jobs`, `cancel`. Fetch `/x/<token>/help` to obtain the authoritative, current protocol rather than assuming parameter names.
+- Results are plain-text envelopes whose first line is `BRIDGE v1 status=… id=… op=…` followed by a blank line and the body. A failing command is still HTTP 200 with `status=failed` and `exit=`; read the body, not the status code. Transport problems (401/400/404/414/429) carry an `error:` body.
+- Long work: `detach=1` returns a job id immediately; `job?id=…&wait=20` waits, `offset=`/`len=` page output, `stream=stderr` selects stderr, `cancel` stops a job. Jobs live in the server process only and do not survive a restart.
+- `nonce=<unique>` makes retries idempotent. Approval is required locally by default; `status=awaiting_approval` means refetch the same job id after the user approves, never resubmit.
+- A fetched agent call is GET-only with no custom headers (no `Authorization`), so the token stays in the URL. The sandbox itself has no publicly fetchable endpoint; reachability comes from the user's tunnel, and the agent's fetch tool must be able to reach that hostname.
+
 ## Verification and repository workflow
 
 Run `python -m unittest discover -s tests -v` for local tests. The fake stdio MCP integration test is skipped without the optional MCP SDK. A real end-to-end test requires a reachable Supabase project and the user's running worker; a live Unreal test additionally requires the configured editor/MCP server.
