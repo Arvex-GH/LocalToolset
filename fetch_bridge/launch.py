@@ -84,16 +84,19 @@ def download(url, destination, say=print):
     request = urllib.request.Request(url, headers={'User-Agent': 'fetch-bridge-launcher'})
     with urllib.request.urlopen(request, timeout=120) as response, \
             open(destination, 'wb') as sink:
-        total, done, tick = response.length or 0, 0, 0
+        total, done, shown = response.length or 0, 0, 0
+        step = max(total // 5, 1 << 20) if total else 10 << 20
         while True:
             chunk = response.read(1 << 16)
             if not chunk:
                 break
             sink.write(chunk)
             done += len(chunk)
-            if done // (1 << 20) > tick:
-                tick = done // (1 << 20)
-                say(f'  … {done >> 20} MiB' + (f' of {total >> 20}' if total else ''))
+            if done - shown >= step:
+                shown = done
+                say(f'  … {done >> 20} MiB' + (f' of {total >> 20} MiB' if total else ''))
+        if total:
+            say(f'  … {total >> 20} MiB done')
     return destination
 
 
@@ -200,10 +203,12 @@ def copy_to_clipboard(text):
     if not command:
         return False
     try:
-        subprocess.run(command, input=text.encode(), stdin=subprocess.PIPE,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+        # input= supplies stdin; passing stdin= as well raises ValueError, and a
+        # clipboard that is unavailable or locked must never stop the launch.
+        subprocess.run(command, input=text.encode(), stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL, timeout=5)
         return True
-    except (OSError, subprocess.SubprocessError):
+    except Exception:
         return False
 
 
