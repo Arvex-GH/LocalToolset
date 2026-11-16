@@ -71,6 +71,20 @@ Other launcher options (anything else is passed to `server.py`):
 | `--no-tunnel` | local only, no cloudflared: prints a `127.0.0.1` URL |
 | `--tunnel-binary PATH` | use a specific cloudflared instead of downloading one |
 | `--tunnel-timeout 60` | wait longer for the tunnel URL (default 30 s) |
+| `--new-token` | write a brand-new random token to `.env`, print it, and exit without starting anything |
+
+## Rotate the token
+
+Double-click **`fetch_bridge\rotate_token.cmd`** (macOS/Linux:
+`./rotate_token.sh`). It replaces `BRIDGE_TOKEN` in `fetch_bridge/.env` with 32
+random bytes, prints the new token, copies it to the clipboard on Windows, and
+leaves every other line of `.env` alone.
+
+The tunnel URL does not change, so the agent only needs the new token. A bridge
+that is **already running keeps accepting the old token** until you restart it
+(Ctrl+C, then `start.cmd`) — the script says so when it finds something listening
+on the bridge port. Without the scripts: edit the `BRIDGE_TOKEN=` line yourself
+and restart, or delete it and let `start.cmd` mint a new one.
 
 First-run notes: Windows may challenge `cloudflared.exe` with SmartScreen
 (More info → Run anyway), and it needs Python 3.9+ on `PATH` (`start.cmd` checks
@@ -214,9 +228,10 @@ the default. If you pass both flags, `--approve` wins.
   anything as your user, with no prompt. Use `--approve`, keep the token private,
   and Ctrl+C the bridge when you are not using it.
 * The token is a bearer credential in a URL. It lands in your terminal, the
-  tunnel provider's logs, and the chat where you sent it. Rotate it by editing
-  `BRIDGE_TOKEN` in `fetch_bridge/.env` and restarting; delete the file to get a
-  brand-new one.
+  tunnel provider's logs, and the chat where you sent it. Rotate it by
+  double-clicking `rotate_token.cmd` and restarting the bridge; or edit
+  `BRIDGE_TOKEN` in `fetch_bridge/.env`, or delete the file to get a brand-new
+  one.
 * You may choose the token yourself, but it has to survive a URL path: 16–200
   characters of `A-Z a-z 0-9 . _ ~ -`. Spaces, `?`, `#`, `&`, `/`, `%`, quotes and
   non-ASCII are refused at startup — they would be parsed as URL syntax and every

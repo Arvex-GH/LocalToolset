@@ -1,4 +1,5 @@
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -635,6 +636,65 @@ class LauncherTests(unittest.TestCase):
             token = (root / '.env').read_text().strip()
             self.assertTrue(token.startswith('BRIDGE_TOKEN='))
             self.assertNotIn('auto', token.lower())
+
+    def test_new_token_rotates_without_starting_anything(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / '.env').write_text(
+                '# keep this comment\nBRIDGE_PORT=9999\nBRIDGE_TOKEN=old-token-0123456789\n',
+                encoding='utf-8')
+            started = []
+            with patch.object(launch, 'HERE', root), \
+                    patch.object(launch, 'port_listening', lambda *a, **k: False), \
+                    patch.object(launch.server, 'main', lambda argv: started.append(argv)), \
+                    patch('sys.stdout', new_callable=io.StringIO) as out:
+                self.assertEqual(launch.main(['--new-token']), 0)
+            text = out.getvalue()
+            self.assertEqual(started, [])
+            token = [line.split(':', 1)[1].strip() for line in text.splitlines()
+                     if line.strip().startswith('token :')][0]
+            self.assertTrue(fetch_server.valid_token(token))
+            self.assertIn(token, text)
+            env = (root / '.env').read_text(encoding='utf-8')
+            self.assertIn('BRIDGE_TOKEN=' + token, env)
+            self.assertNotIn('old-token-0123456789', env)
+            self.assertIn('# keep this comment', env)
+            self.assertIn('BRIDGE_PORT=9999', env)
+            self.assertIn('start.cmd will use this token', text)
+
+    def test_new_token_warns_when_a_bridge_is_still_running(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / '.env').write_text('BRIDGE_TOKEN=old-token-0123456789\n', encoding='utf-8')
+            with patch.object(launch, 'HERE', root), \
+                    patch.object(launch, 'port_listening', lambda *a, **k: True), \
+                    patch.object(launch.server, 'main', lambda argv: None), \
+                    patch('sys.stdout', new_callable=io.StringIO) as out:
+                self.assertEqual(launch.main(['--new-token']), 0)
+            text = out.getvalue()
+            self.assertIn('still listening', text)
+            self.assertIn('Restart it', text)
+            self.assertIn('still works', text)
+            self.assertNotIn('start.cmd will use this token', text)
+
+    def test_every_rotation_produces_a_different_token_and_keeps_the_rest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            env = Path(directory) / '.env'
+            env.write_text('BRIDGE_PORT=9000\nBRIDGE_TOKEN=' + 'a' * 24 + '\n', encoding='utf-8')
+            first, previous = launch.rotate_env_token(env)
+            self.assertEqual(previous, 'a' * 24)
+            second, previous = launch.rotate_env_token(env)
+            self.assertNotEqual(first, second)
+            self.assertEqual(previous, first)
+            self.assertTrue(fetch_server.valid_token(first))
+            self.assertIn('BRIDGE_PORT=9000', env.read_text(encoding='utf-8'))
+
+    def test_rotation_creates_the_file_when_there_is_none(self):
+        with tempfile.TemporaryDirectory() as directory:
+            env = Path(directory) / '.env'
+            token, previous = launch.rotate_env_token(env)
+            self.assertEqual(previous, '')
+            self.assertEqual(env.read_text(encoding='utf-8'), 'BRIDGE_TOKEN=' + token + '\n')
 
     def test_clipboard_never_passes_stdin_and_input_together(self):
         """Regression: Windows raised ValueError here and killed the launch."""
