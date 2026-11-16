@@ -1,7 +1,9 @@
 @echo off
 rem Double-click this file to start the fetch bridge and its Cloudflare tunnel.
-rem Ctrl+C in this window stops both. Extra arguments are passed to server.py,
-rem for example:  start.cmd --auto
+rem Runs in auto mode: fetched requests execute without confirmation.
+rem Add --approve to type YES for every request instead.
+rem Ctrl+C in this window stops both. Other arguments pass through to server.py,
+rem for example:  start.cmd --port 9000
 setlocal
 cd /d "%~dp0"
 

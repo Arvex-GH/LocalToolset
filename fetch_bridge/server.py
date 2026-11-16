@@ -63,6 +63,7 @@ ENV_KEYS = frozenset({
     'BRIDGE_TOKEN', 'BRIDGE_CWD', 'BRIDGE_HOST', 'BRIDGE_PORT',
     'BRIDGE_TIMEOUT_SECONDS', 'BRIDGE_WAIT_SECONDS', 'BRIDGE_STATE_DIR',
     'BRIDGE_MCP_CONFIG', 'BRIDGE_RATE_LIMIT', 'BRIDGE_REQUIRE_NONCE',
+    'BRIDGE_PUBLIC_URL',
 })
 
 ALIASES = {'exec': 'shell', 'run': 'shell', 'sh': 'shell', 'cat': 'read', 'list': 'ls'}
@@ -240,8 +241,8 @@ def default_cwd():
 
 class Settings:
     def __init__(self, cwd, token, host='127.0.0.1', port=DEFAULT_PORT, timeout=60,
-                 wait=15, state_dir=None, auto=False, rate_limit=120,
-                 require_nonce=False, generated_token=False):
+                 wait=10, state_dir=None, auto=False, rate_limit=120,
+                 require_nonce=False, generated_token=False, public_url=None):
         self.cwd = Path(cwd).resolve()
         self.token = token
         self.host = host
@@ -253,6 +254,7 @@ class Settings:
         self.rate_limit = rate_limit
         self.require_nonce = require_nonce
         self.generated_token = generated_token
+        self.public_url = public_url.rstrip('/') if public_url else None
 
     @classmethod
     def from_env(cls, cwd=None):
@@ -276,10 +278,11 @@ class Settings:
         return cls(cwd=cwd, token=token, host=host,
                    port=DEFAULT_PORT if port is None else port,
                    timeout=60 if timeout is None else timeout,
-                   wait=15 if wait is None else wait,
+                   wait=10 if wait is None else wait,
                    state_dir=os.environ.get('BRIDGE_STATE_DIR') or None,
                    rate_limit=120 if rate is None else rate,
-                   require_nonce=require_nonce, generated_token=generated)
+                   require_nonce=require_nonce, generated_token=generated,
+                   public_url=os.environ.get('BRIDGE_PUBLIC_URL') or None)
 
 
 def read_bounded(path, limit=MAX_CAPTURE_BYTES):
@@ -719,7 +722,7 @@ Response shape
   result, not a transport error: read the body.
 
 Paging and waiting
-  job?id=JOBID                 wait (default 15s) for an existing job and show its output
+  job?id=JOBID                 wait (default 10s) for an existing job and show its output
   job?id=JOBID&offset=16384    next page of that output
   job?id=JOBID&stream=stderr   page stderr separately (shell jobs)
   detach=1                     return immediately with the job id
@@ -756,7 +759,8 @@ Authorization and safety
 
 
 def help_text(settings):
-    base = f'http://{settings.host}:{settings.port}/x/<token>'
+    origin = settings.public_url or f'http://{settings.host}:{settings.port}'
+    base = f'{origin}/x/<token>'
     return f"""BRIDGE v{VERSION} — local fetch bridge
 You are talking to a small HTTP listener on the user's computer. Each GET you
 fetch is executed there with the local user's privileges; the result comes back
@@ -766,6 +770,8 @@ Address
   GET {base}/<op>?<params>
   Your token is the <token> path segment above (the user has it).
   Also accepted: /<token>/<op>?... , /?t=<token>&op=<op>, and POST with form data.
+  Long-poll with wait=10 or less: a fetch tool usually gives up around 15
+  seconds. For anything slower use detach=1, then job?id=... to collect output.
 
 Working directory (paths for read/write/edit/ls/mkdir)
   {settings.cwd}

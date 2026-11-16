@@ -10,6 +10,9 @@ call this file directly. It:
 4. prints the public URL, the token and one paste-ready agent line,
 5. runs the bridge in this console, and stops the tunnel when you hit Ctrl+C.
 
+It runs the bridge with ``--auto`` by default: fetched operations execute without
+asking. Pass ``--approve`` to be prompted for ``YES`` on every request instead.
+
 Standard library only. Arguments other than the launcher's own are passed
 straight to ``server.py`` (for example ``start.cmd --auto`` or ``--port 9000``).
 """
@@ -212,9 +215,16 @@ def copy_to_clipboard(text):
         return False
 
 
-def banner(public_url, token, cwd, copied):
+def banner(public_url, token, cwd, copied, mode='auto'):
     agent_line = f'{public_url}/x/{token}/help'
     line = '=' * 68
+    if mode == 'approve':
+        mode_line = 'APPROVAL - type YES for every request'
+        advice = '  Each fetched operation waits for your YES in this window.'
+    else:
+        mode_line = 'AUTO - every request runs immediately, with no confirmation'
+        advice = ('  Anyone with this URL and token can run anything as you.\n'
+                  '  Restart with --approve to confirm each request instead.')
     rows = [
         '', line,
         '  Fetch bridge is up. Ctrl+C stops the bridge and the tunnel.',
@@ -222,6 +232,9 @@ def banner(public_url, token, cwd, copied):
         f'  public URL : {public_url}',
         f'  token      : {token}',
         f'  working dir: {cwd}',
+        f'  mode       : {mode_line}',
+        '',
+        advice,
         '',
         '  GIVE THE AGENT THIS LINE:',
         f'  {agent_line}',
@@ -253,6 +266,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser(
         description='Start the fetch bridge and a Cloudflare tunnel in one step.',
         allow_abbrev=False)
+    parser.add_argument('--approve', action='store_true',
+                        help='ask for YES on every request instead of running automatically')
     parser.add_argument('--no-tunnel', action='store_true',
                         help='run the bridge only (localhost); do not start cloudflared')
     parser.add_argument('--tunnel-binary', default=None,
@@ -276,6 +291,11 @@ def main(argv=None):
     os.environ['BRIDGE_TOKEN'] = token
     if args.cwd:
         forwarded += ['--cwd', args.cwd]
+    # The launcher runs unattended by default; --approve restores the server's
+    # own per-request YES prompt and wins over an explicit --auto.
+    server_args = [flag for flag in forwarded if flag != '--auto']
+    if not args.approve:
+        server_args.append('--auto')
     cwd = args.cwd or os.environ.get('BRIDGE_CWD') or server.default_cwd()
 
     process = log = None
@@ -289,9 +309,11 @@ def main(argv=None):
             log_path = Path(tempfile.gettempdir()) / 'arena-fetch-bridge' / 'tunnel.log'
             log_path.parent.mkdir(parents=True, exist_ok=True)
             process, public_url, log = start_tunnel(binary, port, log_path, args.tunnel_timeout)
+            os.environ['BRIDGE_PUBLIC_URL'] = public_url
             copied = copy_to_clipboard(f'{public_url}/x/{token}/help')
-            print(banner(public_url, token, cwd, copied), flush=True)
-        server.main(forwarded + ['--port', str(port)])
+            print(banner(public_url, token, cwd, copied,
+                         'approve' if args.approve else 'auto'), flush=True)
+        server.main(server_args + ['--port', str(port)])
     except LaunchError as exc:
         sys.exit(f'\n{exc}')
     except KeyboardInterrupt:
