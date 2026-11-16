@@ -229,6 +229,15 @@ def build_action(op, params):
     return action
 
 
+def default_cwd():
+    """The drive/volume root of this installation: C:\\ on Windows, / elsewhere.
+
+    Chosen so a double-clicked launch can read and write anywhere on the system
+    drive without configuration. Pass BRIDGE_CWD (or --cwd) to narrow it.
+    """
+    return Path(Path(__file__).resolve().anchor or os.sep)
+
+
 class Settings:
     def __init__(self, cwd, token, host='127.0.0.1', port=DEFAULT_PORT, timeout=60,
                  wait=15, state_dir=None, auto=False, rate_limit=120,
@@ -247,7 +256,7 @@ class Settings:
 
     @classmethod
     def from_env(cls, cwd=None):
-        cwd = cwd or os.environ.get('BRIDGE_CWD') or '.'
+        cwd = cwd or os.environ.get('BRIDGE_CWD') or default_cwd()
         if not Path(cwd).is_dir():
             raise ValueError('BRIDGE_CWD must be an existing directory')
         token = os.environ.get('BRIDGE_TOKEN', '').strip()
@@ -1003,15 +1012,15 @@ def main(argv=None):
     print(f'Fetch bridge v{VERSION} listening on http://{shown}', flush=True)
     print(f'  working directory: {settings.cwd}', flush=True)
     print(f'  token: {settings.token}' + ('  (generated for this run)' if settings.generated_token else ''), flush=True)
-    print(f'  agent URL: http://{shown}/x/{settings.token}/help', flush=True)
-    print('  expose it with a tunnel so the agent can reach it, e.g.:', flush=True)
-    print(f'    cloudflared tunnel --url http://{host if host != "0.0.0.0" else "127.0.0.1"}:{port}', flush=True)
-    print(f'  then give the agent https://<tunnel-host>/x/{settings.token}/help', flush=True)
+    print(f'  local URL: http://{shown}/x/{settings.token}/help', flush=True)
     if settings.auto:
         print('WARNING: --auto is enabled. Any request with this token runs immediately as this user. '
               'Stop with Ctrl+C.', flush=True)
     else:
-        print('Every operation waits for you to type YES in this terminal.', flush=True)
+        print('Every operation waits for you to type YES in this terminal. Ctrl+C stops the bridge.', flush=True)
+    if settings.generated_token:
+        print('  (no BRIDGE_TOKEN was configured, so this one changes on every start; '
+              'run start.cmd to keep it stable)', flush=True)
     if host not in ('127.0.0.1', 'localhost', '::1'):
         print(f'WARNING: bound to {host}, not loopback. Use a tunnel (TLS) rather than exposing this port; '
               'the token travels in URLs and is not encrypted without HTTPS.', flush=True)

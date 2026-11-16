@@ -2,6 +2,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import threading
@@ -16,6 +17,11 @@ ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location('fetch_server', ROOT / 'fetch_bridge' / 'server.py')
 fetch_server = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(fetch_server)
+
+launch_spec = importlib.util.spec_from_file_location(
+    'fetch_launch', ROOT / 'fetch_bridge' / 'launch.py')
+launch = importlib.util.module_from_spec(launch_spec)
+launch_spec.loader.exec_module(launch)
 
 TOKEN = 'harness-token-0123456789'
 PY = sys.executable
@@ -483,6 +489,88 @@ class ValidationTests(unittest.TestCase):
             settings = fetch_server.Settings.from_env()
         self.assertTrue(settings.generated_token)
         self.assertGreaterEqual(len(settings.token), 16)
+
+
+class LauncherTests(unittest.TestCase):
+    """The double-click path: token persistence, asset choice, URL scraping."""
+
+    def test_tunnel_assets_per_platform(self):
+        self.assertEqual(launch.tunnel_asset('win32', 'AMD64'),
+                         ('cloudflared-windows-amd64.exe', False))
+        self.assertEqual(launch.tunnel_asset('win32', 'arm64'),
+                         ('cloudflared-windows-arm64.exe', False))
+        self.assertEqual(launch.tunnel_asset('linux', 'x86_64'),
+                         ('cloudflared-linux-amd64', False))
+        self.assertEqual(launch.tunnel_asset('linux', 'aarch64'),
+                         ('cloudflared-linux-arm64', False))
+        self.assertEqual(launch.tunnel_asset('darwin', 'arm64'),
+                         ('cloudflared-darwin-arm64.tgz', True))
+
+    def test_tunnel_url_is_scraped_from_cloudflared_output(self):
+        banner = ('2026-11-16T17:20:00Z INF Requesting new quick Tunnel on trycloudflare.com...\n'
+                  '2026-11-16T17:20:02Z INF +--------------------------------------------+\n'
+                  '2026-11-16T17:20:02Z INF |  https://plain-cities-argue.trycloudflare.com  |\n'
+                  '2026-11-16T17:20:02Z INF +--------------------------------------------+\n')
+        self.assertEqual(launch.parse_tunnel_url(banner),
+                         'https://plain-cities-argue.trycloudflare.com')
+        self.assertIsNone(launch.parse_tunnel_url('still connecting'))
+        self.assertIsNone(launch.parse_tunnel_url('https://evil.example.com/'))
+
+    def test_token_is_created_once_and_then_reused(self):
+        with tempfile.TemporaryDirectory() as directory:
+            env = Path(directory) / '.env'
+            first = launch.ensure_env_token(env)
+            self.assertGreaterEqual(len(first), 16)
+            self.assertEqual(env.read_text().strip(), 'BRIDGE_TOKEN=' + first)
+            self.assertEqual(launch.ensure_env_token(env), first)
+            self.assertEqual(env.read_text().count('BRIDGE_TOKEN'), 1)
+
+    def test_other_env_settings_and_comments_survive(self):
+        with tempfile.TemporaryDirectory() as directory:
+            env = Path(directory) / '.env'
+            env.write_text('# my notes\nBRIDGE_CWD=C:\\Projects\nBRIDGE_TOKEN=\n', encoding='utf-8')
+            token = launch.ensure_env_token(env)
+            text = env.read_text()
+            self.assertIn('# my notes', text)
+            self.assertIn('BRIDGE_CWD=C:\\Projects', text)
+            self.assertEqual(text.count('BRIDGE_TOKEN'), 1)
+            self.assertIn('BRIDGE_TOKEN=' + token, text)
+
+    def test_quoted_token_is_kept_and_weak_tokens_are_replaced(self):
+        with tempfile.TemporaryDirectory() as directory:
+            env = Path(directory) / '.env'
+            env.write_text('BRIDGE_TOKEN="a-kept-token-value-0123456789"\n', encoding='utf-8')
+            self.assertEqual(launch.ensure_env_token(env), 'a-kept-token-value-0123456789')
+            env.write_text('BRIDGE_TOKEN=short\n', encoding='utf-8')
+            replacement = launch.ensure_env_token(env)
+            self.assertNotEqual(replacement, 'short')
+            self.assertGreaterEqual(len(replacement), 16)
+
+    def test_banner_carries_the_single_line_to_share(self):
+        text = launch.banner('https://abc.trycloudflare.com', 'token-value-123456', 'C:\\', False)
+        self.assertIn('https://abc.trycloudflare.com/x/token-value-123456/help', text)
+        self.assertIn('Ctrl+C stops the bridge and the tunnel', text)
+        self.assertIn('GIVE THE AGENT THIS LINE', text)
+        self.assertNotIn('clipboard', text)
+
+    def test_stopping_an_absent_or_finished_tunnel_is_safe(self):
+        launch.stop_tunnel(None)
+        finished = subprocess.Popen([sys.executable, '-c', 'pass'])
+        finished.wait(10)
+        launch.stop_tunnel(finished)
+
+
+class DefaultDirectoryTests(unittest.TestCase):
+    def test_default_is_the_volume_root(self):
+        expected = Path(fetch_server.__file__).resolve().anchor
+        self.assertEqual(fetch_server.default_cwd(), Path(expected))
+
+    def test_environment_uses_the_root_unless_told_otherwise(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(fetch_server.Settings.from_env().cwd, fetch_server.default_cwd())
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.dict(os.environ, {'BRIDGE_CWD': directory}, clear=True):
+            self.assertEqual(fetch_server.Settings.from_env().cwd, Path(directory).resolve())
 
 
 if __name__ == '__main__':
