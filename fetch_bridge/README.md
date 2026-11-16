@@ -222,6 +222,39 @@ the default. If you pass both flags, `--approve` wins.
   `archive/supabase-bridge/README.md`; a new server process is started per
   request, so stateful Unreal plugins may not work.
 
+## MCP through the bridge
+
+The bridge can drive one local MCP server. Point `BRIDGE_MCP_CONFIG` at a JSON
+file that describes it:
+
+```json
+{"command": "uvx", "args": ["mcp-for-blender"], "env": {}}
+```
+
+for a stdio server, or
+
+```json
+{"transport": "streamable_http", "url": "http://127.0.0.1:8000/mcp"}
+```
+
+(`sse` works too) for a network one. Then `mcp.list` and `mcp.call` proxy to it.
+The file describes a **single** server, and the bridge starts it per call:
+initialize, one call, exit. Expect a few seconds of startup on every `mcp.call`
+and no state carried between calls — the server itself may keep its own.
+
+Blender, end to end (`uvx mcp-for-blender`, with the addon's server running in
+Blender on port 9876):
+
+```
+GET /x/<token>/mcp.list
+GET /x/<token>/mcp.call?tool=get_scene_info
+GET /x/<token>/mcp.call?tool=execute_blender_code&args={"code":"import bpy\nprint(len(bpy.data.objects))"}
+```
+
+`mcp.list` returns every tool name with its input schema and changes nothing, so
+it is always the right first call. `/help` reports which server is configured (or
+that none is), so a later agent does not have to guess.
+
 ## Security
 
 * **The launcher defaults to auto mode.** Anyone with the URL and token can run

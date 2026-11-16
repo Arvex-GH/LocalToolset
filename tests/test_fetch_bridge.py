@@ -754,6 +754,43 @@ class HelpAndWaitTests(unittest.TestCase):
         with patch.dict(os.environ, {'BRIDGE_WAIT_SECONDS': '20'}, clear=True):
             self.assertEqual(fetch_server.Settings.from_env().wait, 20)
 
+    def test_help_explains_mcp_and_admits_when_it_is_unconfigured(self):
+        with patch.dict(os.environ, {}, clear=True):
+            text = fetch_server.help_text(self.settings())
+        self.assertIn('mcp.call tool=NAME&args=', text)
+        self.assertIn('not configured', text)
+        self.assertIn('carry no state between calls', text)
+        self.assertIn('mcp.call tool=get_scene_info', text)
+
+    def test_help_reports_the_configured_stdio_server(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / 'mcp.json'
+            config.write_text('{"command": "uvx", "args": ["mcp-for-blender"], "env": {}}',
+                              encoding='utf-8')
+            with patch.dict(os.environ, {'BRIDGE_MCP_CONFIG': str(config)}, clear=True):
+                text = fetch_server.help_text(self.settings())
+        self.assertIn('configured: stdio uvx mcp-for-blender', text)
+        self.assertIn('from: ' + str(config), text)
+
+    def test_help_reports_an_http_server_by_url(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / 'mcp.json'
+            config.write_text('{"transport": "streamable_http", "url": "http://10.0.0.5:8000/mcp"}',
+                              encoding='utf-8')
+            with patch.dict(os.environ, {'BRIDGE_MCP_CONFIG': str(config)}, clear=True):
+                text = fetch_server.help_text(self.settings())
+        self.assertIn('configured: streamable_http http://10.0.0.5:8000/mcp', text)
+
+    def test_help_survives_an_unusable_mcp_config(self):
+        with tempfile.TemporaryDirectory() as directory:
+            broken = Path(directory) / 'broken.json'
+            broken.write_text('not json', encoding='utf-8')
+            for path in (str(broken), str(Path(directory) / 'absent.json')):
+                with self.subTest(path=path), \
+                        patch.dict(os.environ, {'BRIDGE_MCP_CONFIG': path}, clear=True):
+                    text = fetch_server.help_text(self.settings())
+                self.assertIn('unusable: ' + path, text)
+
     def test_public_url_comes_from_the_environment(self):
         with patch.dict(os.environ, {'BRIDGE_PUBLIC_URL': 'https://abc.test/'}, clear=True):
             self.assertEqual(fetch_server.Settings.from_env().public_url, 'https://abc.test')
