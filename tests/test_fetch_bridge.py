@@ -32,6 +32,7 @@ class Harness(unittest.TestCase):
 
     auto = True
     rate_limit = 10_000
+    auth_failure_limit = 20
 
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
@@ -49,7 +50,8 @@ class Harness(unittest.TestCase):
     def settings(self, **overrides):
         options = dict(cwd=self.root, token=TOKEN, host='127.0.0.1', port=0, timeout=10,
                        wait=5, state_dir=Path(self.temporary.name) / 'state',
-                       auto=self.auto, rate_limit=self.rate_limit)
+                       auto=self.auto, rate_limit=self.rate_limit,
+                       auth_failure_limit=self.auth_failure_limit)
         options.update(overrides)
         return fetch_server.Settings(**options)
 
@@ -395,6 +397,17 @@ class McpWiringTests(Harness):
         self.assertIn('BRIDGE_MCP_CONFIG', self.body(payload))
 
 
+class AuthThrottleTests(Harness):
+    auth_failure_limit = 2
+
+    def test_guessing_is_throttled_but_the_real_token_keeps_working(self):
+        wrong = 'wrong-token-0000000000'
+        self.assertIn('unauthorized', self.op('ping', token=wrong, expect=401))
+        self.op('ping', token=wrong, expect=401)
+        self.assertIn('too many wrong tokens', self.op('ping', token=wrong, expect=429))
+        self.assertEqual(self.op('ping').strip().split()[0], 'pong')
+
+
 class RateLimitTests(Harness):
     rate_limit = 3
 
@@ -460,6 +473,26 @@ class ValidationTests(unittest.TestCase):
             self.build('mcp.call', {'tool': 't', 'args': '[1]'})
         with self.assertRaises(fetch_server.ParamError):
             self.build('mcp.call', {'tool': 't', 'args': '{bad'})
+
+    def test_token_must_survive_a_url_path(self):
+        for good in ('memorable-token-42', 'MyMemorableToken42', 'a' * 16,
+                     'x.y_z~-0123456789', 'A' * 200):
+            self.assertTrue(fetch_server.valid_token(good), good)
+        for bad in ('short', 'has space inside it', 'with?question=1&2',
+                    'with#hash12345678', 'sl/ash-in-token-1', 'tökén-with-umlaut-1',
+                    'quote"inside-token-1', 'per%cent-in-token-1', 'x', 'help',
+                    'shell', 'exec', 'a' * 201):
+            self.assertFalse(fetch_server.valid_token(bad), bad)
+
+    def test_environment_rejects_tokens_that_cannot_travel_in_a_url(self):
+        for bad in ('has space inside it', 'with?question=mark&and', 'tökén-with-umlaut-1'):
+            with self.subTest(token=bad), patch.dict(os.environ, {'BRIDGE_TOKEN': bad}, clear=True):
+                with self.assertRaisesRegex(ValueError, 'URL path'):
+                    fetch_server.Settings.from_env()
+
+    def test_a_memorable_url_safe_token_is_accepted(self):
+        with patch.dict(os.environ, {'BRIDGE_TOKEN': 'unreal-editor-bridge-42'}, clear=True):
+            self.assertEqual(fetch_server.Settings.from_env().token, 'unreal-editor-bridge-42')
 
     def test_control_characters_are_escaped_for_the_terminal(self):
         self.assertEqual(fetch_server.printable('a\x1b[2Kb', 100), 'a\\x1b[2Kb')
@@ -535,6 +568,15 @@ class LauncherTests(unittest.TestCase):
             self.assertIn('BRIDGE_CWD=C:\\Projects', text)
             self.assertEqual(text.count('BRIDGE_TOKEN'), 1)
             self.assertIn('BRIDGE_TOKEN=' + token, text)
+
+    def test_launcher_replaces_a_token_that_cannot_travel_in_a_url(self):
+        with tempfile.TemporaryDirectory() as directory:
+            env = Path(directory) / '.env'
+            env.write_text('BRIDGE_TOKEN=has space inside it\n', encoding='utf-8')
+            token = launch.ensure_env_token(env)
+            self.assertNotEqual(token, 'has space inside it')
+            self.assertTrue(fetch_server.valid_token(token))
+            self.assertIn(token, env.read_text())
 
     def test_quoted_token_is_kept_and_weak_tokens_are_replaced(self):
         with tempfile.TemporaryDirectory() as directory:
