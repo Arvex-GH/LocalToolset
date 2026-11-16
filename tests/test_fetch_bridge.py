@@ -553,6 +553,34 @@ class LauncherTests(unittest.TestCase):
         self.assertIn('GIVE THE AGENT THIS LINE', text)
         self.assertNotIn('clipboard', text)
 
+    def test_clipboard_never_passes_stdin_and_input_together(self):
+        """Regression: Windows raised ValueError here and killed the launch."""
+        calls = {}
+
+        def strict_run(command, **kwargs):  # mirrors subprocess.run's own check
+            calls.update(command=command, **kwargs)
+            if 'input' in kwargs and 'stdin' in kwargs:
+                raise ValueError('stdin and input arguments may not both be used.')
+            return subprocess.CompletedProcess(command, 0)
+
+        with patch.object(launch.sys, 'platform', 'win32'), \
+                patch.object(launch.subprocess, 'run', strict_run):
+            self.assertTrue(launch.copy_to_clipboard('https://example.test/x/t/help'))
+        self.assertEqual(calls['command'], ['clip'])
+        self.assertIn('input', calls)
+        self.assertNotIn('stdin', calls)
+        self.assertEqual(calls['input'], b'https://example.test/x/t/help')
+
+    def test_a_broken_clipboard_returns_false_instead_of_raising(self):
+        def explode(*args, **kwargs):
+            raise OSError('clipboard locked')
+
+        with patch.object(launch.sys, 'platform', 'win32'), \
+                patch.object(launch.subprocess, 'run', explode):
+            self.assertFalse(launch.copy_to_clipboard('text'))
+        with patch.object(launch.sys, 'platform', 'freebsd14'):
+            self.assertFalse(launch.copy_to_clipboard('text'))
+
     def test_stopping_an_absent_or_finished_tunnel_is_safe(self):
         launch.stop_tunnel(None)
         finished = subprocess.Popen([sys.executable, '-c', 'pass'])
