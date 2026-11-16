@@ -19,9 +19,9 @@ The tunnel connection is opened *by your PC*, so there is no public IP, no port
 forwarding and no inbound hole on either side. The agent only needs a tool that
 can fetch a URL — no custom headers, no POST, no signing.
 
-## Why this exists next to `bridge/worker.py`
+## Why this exists next to the archived queue bridge
 
-| | Supabase queue (`bridge/`) | Fetch bridge (`fetch_bridge/`) |
+| | Supabase queue (`archive/supabase-bridge/`, archived) | Fetch bridge (`fetch_bridge/`) |
 |---|---|---|
 | Transport | row in `arena_bridge_commands` | query string of a fetched URL |
 | Wake-up | worker polls every 3 s | server already listening |
@@ -216,7 +216,7 @@ auto mode applies to the running process only.
 | `BRIDGE_WAIT_SECONDS` | `15` | how long a fetch waits inline, 1–25 |
 | `BRIDGE_RATE_LIMIT` | `120` | authenticated requests per minute |
 | `BRIDGE_REQUIRE_NONCE` | `0` | require `nonce=` on job-creating requests |
-| `BRIDGE_MCP_CONFIG` | unset | local JSON file, same format as `bridge/README.md` |
+| `BRIDGE_MCP_CONFIG` | unset | local JSON file, same format as `archive/supabase-bridge/README.md` |
 
 * File operations are UTF-8 text, 1 MB per file, writes default to create-only
   (`mode=overwrite` or `mode=append` to change that), parent directories must
@@ -231,7 +231,7 @@ auto mode applies to the running process only.
 * `nonce=<unique>` makes retries safe: repeating the same nonce returns the
   original job instead of running the command twice.
 * MCP is the same stdio/Streamable-HTTP/SSE client documented in
-  `bridge/README.md`; a new server process is started per request, so stateful
+  `archive/supabase-bridge/README.md`; a new server process is started per request, so stateful
   Unreal plugins may not work.
 
 ## Security

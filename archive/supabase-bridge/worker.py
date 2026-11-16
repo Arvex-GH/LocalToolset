@@ -13,7 +13,8 @@ import urllib.parse
 import urllib.request
 import uuid
 
-from actions import parse_command, dispatch
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'shared'))
+from actions import parse_command, dispatch  # shared/actions.py
 
 MAX_OUTPUT = 32_768
 ENV_KEYS = frozenset({
@@ -96,11 +97,11 @@ def main(argv=None):
     try:
         load_env_file(Path(__file__).resolve().parent / '.env')
     except (OSError, UnicodeError, ValueError) as exc:
-        sys.exit(f'Cannot load bridge/.env: {exc}')
+        sys.exit(f'Cannot load archive/supabase-bridge/.env: {exc}')
     base = os.environ.get('SUPABASE_URL', '').rstrip('/')
     key = os.environ.get('SUPABASE_SECRET_KEY', '')
     if not base.startswith('https://') or not key:
-        sys.exit('Set SUPABASE_URL (https) and SUPABASE_SECRET_KEY in bridge/.env or your environment.')
+        sys.exit('Set SUPABASE_URL (https) and SUPABASE_SECRET_KEY in archive/supabase-bridge/.env or your environment.')
     cwd = Path(os.environ.get('BRIDGE_CWD', '.')).resolve()
     if not cwd.is_dir():
         sys.exit('BRIDGE_CWD must be an existing directory.')

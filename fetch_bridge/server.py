@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Local fetch bridge: an authenticated HTTP endpoint that runs what you fetch.
 
-This is the pull-free companion to ``bridge/worker.py``. The queue bridge needs
+This is the pull-free companion to the archived ``archive/supabase-bridge/worker.py``. The queue bridge needs
 a Supabase project, a connector, and a worker that polls. This one needs only a
 URL: it listens on a local port (normally reached through a tunnel), and every
 HTTP GET you *fetch* carries the request. The server runs the operation and
@@ -42,11 +42,11 @@ import urllib.parse
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'bridge'))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'shared'))
 try:
     import actions as bridge_actions
 except ImportError as exc:  # pragma: no cover - installation problem
-    sys.exit(f'Cannot import bridge/actions.py; keep fetch_bridge/ next to bridge/ ({exc}).')
+    sys.exit(f'Cannot import shared/actions.py; keep shared/ next to fetch_bridge/ ({exc}).')
 
 VERSION = '1'
 MAX_URL_CHARS = 6000
@@ -111,7 +111,7 @@ def printable(text, limit):
 def load_env_file(path):
     """Load supported settings without overriding the process environment.
 
-    Same literal semantics as bridge/worker.py: KEY=value lines, full-line
+    Same literal semantics as the archived worker: KEY=value lines, full-line
     comments, optional matching quotes, no expansion or inline comments.
     """
     path = Path(path)

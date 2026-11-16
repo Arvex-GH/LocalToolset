@@ -1,4 +1,10 @@
-"""Structured, approval-gated queue actions. No remote-controlled MCP configuration."""
+"""File and MCP helpers shared by both transports.
+
+Used by the archived Supabase worker (archive/supabase-bridge/worker.py) and
+by the fetch bridge (fetch_bridge/server.py). Path confinement, size caps,
+and MCP dispatch live here so the two transports cannot drift apart. No
+remote-controlled MCP configuration.
+"""
 import asyncio
 import json
 import os

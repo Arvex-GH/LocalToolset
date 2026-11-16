@@ -357,7 +357,7 @@ class EnvelopeTests(Harness):
 
 
 class McpWiringTests(Harness):
-    """The MCP transport is bridge/actions.py; check the fetch-side wiring only."""
+    """The MCP transport is shared/actions.py; check the fetch-side wiring only."""
 
     def test_mcp_results_and_tool_errors_are_rendered(self):
         calls = []

@@ -1,17 +1,17 @@
 # Local toolset for Arena agents
 
 Two ways for a cloud agent to run work on your own computer. Both keep the
-agent out of your network: your machine either polls out, or serves one
-authenticated URL through a tunnel you choose.
+agent out of your network: your machine either serves one authenticated URL
+through a tunnel you choose, or polls a queue you own.
 
-| | [`bridge/`](bridge/README.md) — Supabase queue | [`fetch_bridge/`](fetch_bridge/README.md) — fetch bridge |
+| | [`fetch_bridge/`](fetch_bridge/README.md) — default | [`archive/supabase-bridge/`](archive/supabase-bridge/README.md) — archived |
 |---|---|---|
-| Request path | row in a Postgres queue | the agent's `fetch` of a URL |
-| Needs in the cloud | Supabase project + connector + service-role key | nothing |
-| Wake-up | local worker polls every 3 s | listener is already waiting |
-| Result | stored in a column, read separately | returned in the same HTTP response |
-| Keeps history across restarts | yes | no (in-memory jobs) |
-| Setup | schema, wait SQL, `.env`, worker | one Python file, one tunnel |
+| Request path | the agent's `fetch` of a URL | row in a Postgres queue |
+| Needs in the cloud | nothing | Supabase project + connector + service-role key |
+| Wake-up | listener is already waiting | local worker polls every 3 s |
+| Result | returned in the same HTTP response | stored in a column, read separately |
+| Keeps history across restarts | no (in-memory jobs) | yes |
+| Setup | one Python file, one tunnel | schema, wait SQL, `.env`, worker |
 
 Both expose the same capabilities — shell commands, text file read/write/edit,
 directory listing, and an optional stdio/HTTP MCP client (for example an Unreal
@@ -22,9 +22,11 @@ Start here:
 
 - `AGENTS.md` — how an agent should use either transport, and what to be
   careful about.
-- `bridge/README.md` — the Supabase queue bridge.
 - `fetch_bridge/README.md` — the fetch bridge, including tunnel options
   (Cloudflare, Tailscale Funnel, ngrok) and the URL cookbook.
+- `archive/supabase-bridge/README.md` — the earlier Supabase queue bridge,
+  archived but still working; its schema and wait SQL live beside it.
+- `shared/actions.py` — file, path-confinement and MCP helpers used by both.
 - `prompt.md` / `fetch_bridge/prompt.md` — paste-in prompts for each transport.
 
 Tests: `python -m unittest discover -s tests -v`.
