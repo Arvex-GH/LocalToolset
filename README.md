@@ -1,8 +1,8 @@
 # Local toolset for Arena agents
 
-Two ways for a cloud agent to run work on your own computer. Both keep the
-agent out of your network: your machine either serves one authenticated URL
-through a tunnel you choose, or polls a queue you own.
+Three ways for a cloud agent to run work on infrastructure you control. The
+agent either fetches one authenticated URL, polls a queue you own, or reaches a
+website you host — you pick the one that matches where the work has to happen.
 
 | | [`fetch_bridge/`](fetch_bridge/README.md) — default | [`archive/supabase-bridge/`](archive/supabase-bridge/README.md) — archived |
 |---|---|---|
@@ -27,6 +27,9 @@ Start here:
 - `archive/supabase-bridge/README.md` — the earlier Supabase queue bridge,
   archived but still working; its schema and wait SQL live beside it.
 - `shared/actions.py` — file, path-confinement and MCP helpers used by both.
+- `site_bridge/README.md` — the PHP variant for a website on shared hosting:
+  token-gated file/database/PHP access plus an admin panel that shows what the
+  agent is doing, live.
 - `prompt.md` / `fetch_bridge/prompt.md` — paste-in prompts for each transport.
 
 Tests: `python -m unittest discover -s tests -v`.

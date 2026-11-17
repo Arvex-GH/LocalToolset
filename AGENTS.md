@@ -15,6 +15,11 @@ This repository contains two transports that let a cloud agent run work on a use
 
 The agent fetches an authenticated URL on a listener running on the user's computer; the server executes the operation and returns the result in the same response. Reachability comes from a tunnel the user's PC dials out to (Cloudflare, Tailscale Funnel, ngrok, or a VPS), so there is no inbound port and the sandbox needs no public address.
 
+- `site_bridge/` — the same protocol in PHP for a website on shared hosting (no
+  shell, no cron, requests capped near 10 s): `bridge.php` (endpoint, tokens from
+  MySQL), `index.php` (password-protected panel: issue/revoke tokens, live
+  activity feed), `setup.php` (one-time tables + admin password), `bridge_lib.php`
+  (config, DB, token hashing, logging), `bridge.secrets.example.php`.
 - Files: `fetch_bridge/server.py` (stdlib only, except the optional MCP SDK), `fetch_bridge/launch.py` + `start.cmd`/`start.sh` (one-click launcher: token, cloudflared download, tunnel, banner), `fetch_bridge/rotate_token.cmd`/`rotate_token.sh` (`--new-token`: rewrite the token, print it, exit), `fetch_bridge/README.md` (setup, tunnel options, URL cookbook, MCP wiring, limits, security), `fetch_bridge/.env.example`, `fetch_bridge/prompt.md` (paste-in agent prompt).
 - The launcher prints the public URL, the token, the mode and a paste-ready `/x/<token>/help` line; Ctrl+C stops both the bridge and the tunnel. The working directory defaults to the root of the installation's drive (`C:\` on Windows) and can be narrowed with `--cwd`/`BRIDGE_CWD`.
 - **The launcher runs with `--auto` by default**, so operations execute without local confirmation; the user passes `--approve` to require `YES` per request. `server.py` on its own still defaults to approval. Treat an auto-mode bridge as full remote control of that machine: only do what the user asked, and never send secrets through a URL or response.
