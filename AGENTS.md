@@ -15,11 +15,14 @@ This repository contains two transports that let a cloud agent run work on a use
 
 The agent fetches an authenticated URL on a listener running on the user's computer; the server executes the operation and returns the result in the same response. Reachability comes from a tunnel the user's PC dials out to (Cloudflare, Tailscale Funnel, ngrok, or a VPS), so there is no inbound port and the sandbox needs no public address.
 
-- `site_bridge/` — the same protocol in PHP for a website on shared hosting (no
-  shell, no cron, requests capped near 10 s): `bridge.php` (endpoint, tokens from
-  MySQL), `index.php` (password-protected panel: issue/revoke tokens, live
-  activity feed), `setup.php` (one-time tables + admin password), `bridge_lib.php`
-  (config, DB, token hashing, logging), `bridge.secrets.example.php`.
+- `site_bridge/` — the same protocol in PHP for a website on shared hosting. No
+  shell, no cron, no database; requests are capped near 10 s by the host. Three
+  files, each self-contained on purpose (a half-finished upload of one must not
+  break the others): `bridge.php` (endpoint), `index.php` (panel),
+  `setup.php` (first-run admin password). State is a single
+  `bridge_state.json` holding the password hash, the tokens, the settings
+  (`root`, `allow_php`) and the activity log; it lives above the web root when
+  the host permits, otherwise a generated `.htaccess` denies it.
 - Files: `fetch_bridge/server.py` (stdlib only, except the optional MCP SDK), `fetch_bridge/launch.py` + `start.cmd`/`start.sh` (one-click launcher: token, cloudflared download, tunnel, banner), `fetch_bridge/rotate_token.cmd`/`rotate_token.sh` (`--new-token`: rewrite the token, print it, exit), `fetch_bridge/README.md` (setup, tunnel options, URL cookbook, MCP wiring, limits, security), `fetch_bridge/.env.example`, `fetch_bridge/prompt.md` (paste-in agent prompt).
 - The launcher prints the public URL, the token, the mode and a paste-ready `/x/<token>/help` line; Ctrl+C stops both the bridge and the tunnel. The working directory defaults to the root of the installation's drive (`C:\` on Windows) and can be narrowed with `--cwd`/`BRIDGE_CWD`.
 - **The launcher runs with `--auto` by default**, so operations execute without local confirmation; the user passes `--approve` to require `YES` per request. `server.py` on its own still defaults to approval. Treat an auto-mode bridge as full remote control of that machine: only do what the user asked, and never send secrets through a URL or response.
@@ -36,6 +39,28 @@ The agent fetches an authenticated URL on a listener running on the user's compu
 - The agent's fetch is GET-only with no custom headers, so the token travels in the URL. Response bodies are `text/plain` and arrive verbatim; JSON (`format=json`) may be wrapped in a code fence by fetching clients.
 - Jobs are held in the server process: `job?id=` returns 404 after a restart, and only the most recent 100 are kept.
 - Limits and safety: paths are confined to `BRIDGE_CWD` and text is capped at 1 MB per file, but shell and MCP operations are **not** sandboxed. Confirm sensitive or irreversible work with the user; never send secrets through a URL or response.
+
+### The PHP transport (`site_bridge/`)
+
+Same envelope and same file vocabulary, minus the parts PHP cannot do. There is
+no shell and no SQL: `op=shell` and `op=sql` do not exist, and `op=php` is
+disabled until the user turns it on in the panel. Calls are GETs with the token
+in the URL (`?t=<token>&op=…`, `/x/<token>/<op>`, or a bearer header), so a
+token is a bearer credential in the chat where it was shared.
+
+- Ask for `op=help` before anything else; it is the authoritative live list.
+- `ls`, `read`, `write`, `edit`, `mkdir`, `rm`, `upload` work on paths inside the
+  configured `root` (the folder holding the three files unless narrowed).
+- Every fetch is a single short request. For anything slower than a few seconds
+  use `op=php&detach=1` (only if the user enabled PHP) or split the work into
+  small steps, then collect with `op=job&id=…`: each `job` call runs one ~5 s
+  tick, so polling repeatedly is what advances the work.
+- `op=ping` proves the token and `op=selftest` reports the environment (root,
+  writable state, PHP version, limits). A `401` means the token is wrong,
+  expired or revoked; a `429` means too many failures from that address. Report
+  either to the user rather than retrying; the panel shows both in its feed.
+- The state file contains the admin password hash and the tokens. Never read it
+  back to the user, never echo a token, and never fetch it over HTTP.
 
 ## Archived: Supabase queue bridge
 

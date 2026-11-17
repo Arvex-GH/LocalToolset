@@ -1,91 +1,168 @@
 <?php
 /**
- * setup.php — run once, then delete.
+ * setup.php — run this once.
  *
- * Creates the three tables and stores the admin password hash. Refuses to do
- * anything once a password exists, so leaving it uploaded is not a way back in.
+ * It is the only page that can write the administrator password, and it stops
+ * working the moment a password exists. Upload it next to bridge.php and
+ * index.php, open it in a browser, type a password, then delete it.
  */
 
 declare(strict_types=1);
 
-require __DIR__ . '/bridge_lib.php';
+const SETUP_VERSION = '1';
 
-$secure = sb_is_https();
-session_set_cookie_params(array(
-    'lifetime' => 0,
-    'path' => '/',
-    'httponly' => true,
-    'secure' => $secure,
-    'samesite' => 'Lax',
-));
-session_name('sitebridge_setup');
+$secure = (!empty($_SERVER['HTTPS']) && strtolower((string) $_SERVER['HTTPS']) !== 'off')
+    || (isset($_SERVER['HTTP_X_FORWARDED_PROTO'])
+        && strtolower((string) $_SERVER['HTTP_X_FORWARDED_PROTO']) === 'https');
+session_set_cookie_params(array('lifetime' => 0, 'path' => '/', 'httponly' => true,
+                                'secure' => $secure, 'samesite' => 'Lax'));
+session_name('sitebridge');
 session_start();
 
-if (empty($_SESSION['csrf'])) {
-    $_SESSION['csrf'] = bin2hex(random_bytes(16));
+function setup_state_path(): string
+{
+    $outside = dirname(__DIR__) . '/bridge_state.json';
+    $inside = __DIR__ . '/bridge_state.json';
+    foreach (array($outside, $inside) as $candidate) {
+        if (is_file($candidate)) {
+            return $candidate;
+        }
+    }
+    $parent = dirname(__DIR__);
+    if (is_dir($parent) && is_writable($parent) && $parent !== __DIR__) {
+        return $outside;
+    }
+    return $inside;
 }
 
-$messages = array();
-$fatal = '';
+function setup_state_load(): array
+{
+    $empty = array('password_hash' => '', 'password_plain' => '',
+                   'settings' => array(), 'tokens' => array(), 'activity' => array());
+    $raw = @file_get_contents(setup_state_path());
+    $data = $raw === false ? null : json_decode($raw, true);
+    if (!is_array($data)) {
+        return $empty;
+    }
+    $data += $empty;
+    foreach (array('settings', 'tokens', 'activity') as $key) {
+        if (!is_array($data[$key])) {
+            $data[$key] = array();
+        }
+    }
+    return $data;
+}
+
+function setup_state_save(array $state): bool
+{
+    $encoded = json_encode($state, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES
+        | JSON_UNESCAPED_UNICODE | JSON_PARTIAL_OUTPUT_ON_ERROR);
+    if ($encoded === false) {
+        return false;
+    }
+    $path = setup_state_path();
+    $handle = @fopen($path, 'c+');
+    if ($handle === false) {
+        return false;
+    }
+    $ok = false;
+    if (flock($handle, LOCK_EX)) {
+        ftruncate($handle, 0);
+        rewind($handle);
+        $ok = fwrite($handle, $encoded) !== false;
+        fflush($handle);
+        flock($handle, LOCK_UN);
+    }
+    fclose($handle);
+    @chmod($path, 0600);
+    return $ok;
+}
+
+function h(string $text): string
+{
+    return htmlspecialchars($text, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+}
+
+/**
+ * If the state file ends up inside the web root, drop a deny-all rule beside it
+ * so nobody can fetch the password hash and the tokens over HTTP.
+ */
+function setup_guard_state_file(string $path): string
+{
+    if (dirname($path) !== __DIR__) {
+        return 'the state file sits above the web root — already unreachable over HTTP';
+    }
+    $htaccess = __DIR__ . '/.htaccess';
+    $rule = "# site_bridge: keep state and job files private\n"
+        . "<FilesMatch \"^(bridge_state|bridge_jobs|job-.*)\">\n"
+        . "  Require all denied\n"
+        . "</FilesMatch>\n";
+    $existing = is_file($htaccess) ? (string) @file_get_contents($htaccess) : '';
+    if (strpos($existing, 'site_bridge: keep state') !== false) {
+        return 'a deny rule for the state file is already in .htaccess';
+    }
+    $written = @file_put_contents($htaccess, rtrim($existing) . "\n\n" . $rule,
+        FILE_APPEND | LOCK_EX) !== false;
+    return $written
+        ? 'wrote a deny rule for the state file into .htaccess'
+        : 'could not write .htaccess — make sure bridge_state.json cannot be fetched';
+}
+
+$state = setup_state_load();
+$installed = $state['password_hash'] !== '' || $state['password_plain'] !== '';
+$problems = array();
 $done = false;
-$link = null;
+$guardNote = '';
 
-if (!sb_config_ready()) {
-    $fatal = 'bridge.secrets.php is missing or has no db section.';
-} else {
-    try {
-        $link = sb_db();
-    } catch (Throwable $exc) {
-        $fatal = $exc->getMessage();
+if (!$installed && $_SERVER['REQUEST_METHOD'] === 'POST') {
+    $password = isset($_POST['password']) ? (string) $_POST['password'] : '';
+    $again = isset($_POST['again']) ? (string) $_POST['again'] : '';
+    if (strlen($password) < 8) {
+        $problems[] = 'Use at least 8 characters — this password is the whole lock on a public URL.';
     }
-}
-
-$installed = false;
-if ($link !== null) {
-    try {
-        $installed = sb_installed($link);
-    } catch (Throwable $exc) {
-        $installed = false;
+    if ($password !== $again) {
+        $problems[] = 'The two passwords do not match.';
     }
-}
-
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && $link !== null && !$installed) {
-    $sent = isset($_POST['csrf']) && is_string($_POST['csrf']) ? $_POST['csrf'] : '';
-    if (!hash_equals((string) $_SESSION['csrf'], $sent)) {
-        $messages[] = array('error', 'The form token expired. Reload and try again.');
-    } else {
-        $password = isset($_POST['password']) ? (string) $_POST['password'] : '';
-        $again = isset($_POST['again']) ? (string) $_POST['again'] : '';
-        if (strlen($password) < 10) {
-            $messages[] = array('error', 'Use at least 10 characters for the admin password.');
-        } elseif ($password !== $again) {
-            $messages[] = array('error', 'The two passwords do not match.');
+    if (!$problems) {
+        $state['password_hash'] = password_hash($password, PASSWORD_DEFAULT);
+        $state['password_plain'] = '';
+        if (!isset($state['settings']) || !is_array($state['settings'])) {
+            $state['settings'] = array();
+        }
+        if (!array_key_exists('allow_php', $state['settings'])) {
+            $state['settings']['allow_php'] = false;
+        }
+        $lastId = 0;
+        if ($state['activity']) {
+            $tail = $state['activity'][count($state['activity']) - 1];
+            $lastId = isset($tail['id']) ? (int) $tail['id'] : 0;
+        }
+        $state['activity'][] = array(
+            'id' => $lastId + 1,
+            'ts' => date('Y-m-d H:i:s'),
+            'op' => 'panel',
+            'summary' => 'administrator password set by setup.php',
+            'status' => 'ok',
+            'ms' => 0,
+            'bytes' => 0,
+            'ip' => isset($_SERVER['REMOTE_ADDR']) ? (string) $_SERVER['REMOTE_ADDR'] : '',
+            'token' => '',
+        );
+        if (setup_state_save($state)) {
+            $installed = true;
+            $done = true;
+            $guardNote = setup_guard_state_file(setup_state_path());
         } else {
-            try {
-                sb_install_schema($link);
-                sb_setting_put($link, 'admin_hash', password_hash($password, PASSWORD_DEFAULT));
-                sb_setting_put($link, 'installed_at', sb_now());
-                sb_setting_put($link, 'instance_name', sb_clip((string) ($_SERVER['HTTP_HOST'] ?? 'site'), 64));
-                sb_log($link, null, 'panel', 'installed site_bridge ' . SB_VERSION, 'ok', 0, 0);
-                $guard = __DIR__ . '/.htaccess';
-                $rule = "\n<Files \"bridge.secrets.php\">\n"
-                    . "  Require all denied\n"
-                    . "  <IfModule !mod_authz_core.c>\n    Order allow,deny\n    Deny from all\n  </IfModule>\n"
-                    . "</Files>\n";
-                $existing = is_file($guard) ? (string) @file_get_contents($guard) : '';
-                if (strpos($existing, 'bridge.secrets.php') === false) {
-                    @file_put_contents($guard, $existing . $rule);
-                }
-                $done = true;
-                $installed = true;
-            } catch (Throwable $exc) {
-                $messages[] = array('error', $exc->getMessage());
-            }
+            $problems[] = 'Could not write ' . setup_state_path()
+                . '. Give that folder write permission (755) and reload.';
         }
     }
 }
 
-$secretsPath = sb_secrets_path();
+$statePath = setup_state_path();
+$folder = dirname($statePath);
+$folderWritable = is_writable($folder) || (is_file($statePath) && is_writable($statePath));
+$sameFolder = $folder === __DIR__;
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -93,134 +170,116 @@ $secretsPath = sb_secrets_path();
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow">
-<title>site_bridge — setup</title>
+<title>site_bridge — first run</title>
 <style>
-:root {
-  --bg: #0a0f1c; --panel: #111a2e; --panel-2: #16223a; --line: #23304d;
-  --text: #e6edf7; --muted: #8ea0bd; --accent: #5eead4; --err: #f87171; --ok: #34d399;
-  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-}
+:root { --bg:#0a0f1c; --panel:#111a2e; --line:#23304d; --text:#e6edf7; --muted:#8ea0bd;
+  --accent:#5eead4; --ok:#34d399; --err:#f87171; --warn:#fbbf24;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 * { box-sizing: border-box; }
-body {
-  margin: 0; background: radial-gradient(1200px 600px at 15% -10%, #16233d 0%, var(--bg) 55%);
-  color: var(--text); font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-  min-height: 100vh; padding: 40px 20px;
-}
-.wrap { max-width: 680px; margin: 0 auto; }
-.card {
-  background: linear-gradient(180deg, var(--panel) 0%, var(--panel-2) 100%);
-  border: 1px solid var(--line); border-radius: 16px; padding: 22px; margin-bottom: 18px;
-}
-h1 { font-size: 20px; margin: 0 0 6px; }
-h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .12em; color: var(--muted); margin: 22px 0 10px; }
-p { margin: 8px 0; }
-a { color: var(--accent); }
-code, pre { font-family: var(--mono); font-size: 12.5px; }
-pre { background: #0a1220; border: 1px solid var(--line); border-radius: 10px; padding: 12px; overflow: auto; }
-label { display: block; font-size: 12px; color: var(--muted); margin: 12px 0 5px; }
-input[type=password] {
-  width: 100%; padding: 11px 12px; border-radius: 10px; background: #0c1526;
-  border: 1px solid var(--line); color: var(--text); font: inherit;
-}
-button {
-  font: inherit; font-weight: 600; padding: 11px 18px; border-radius: 10px; border: 0;
-  background: var(--accent); color: #062016; cursor: pointer; margin-top: 16px;
-}
-.flash { border-radius: 12px; padding: 11px 14px; margin: 10px 0; border: 1px solid; font-size: 14px; }
-.flash.error { background: rgba(248,113,113,.1); border-color: rgba(248,113,113,.4); color: #fecaca; }
-.flash.ok { background: rgba(52,211,153,.1); border-color: rgba(52,211,153,.4); color: #bbf7d0; }
-.muted { color: var(--muted); font-size: 13px; }
-.step { display: flex; gap: 12px; margin: 14px 0; }
-.num {
-  flex: 0 0 26px; height: 26px; border-radius: 50%; background: rgba(94,234,212,.12);
-  color: var(--accent); border: 1px solid rgba(94,234,212,.35); display: flex;
-  align-items: center; justify-content: center; font-size: 13px; font-weight: 650;
-}
+body { margin:0; min-height:100vh; color:var(--text);
+  background: radial-gradient(1100px 560px at 20% -12%, #16233d 0%, var(--bg) 58%);
+  font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+.wrap { max-width: 560px; margin: 0 auto; padding: 9vh 20px 60px; }
+.brand { display:flex; align-items:center; gap:10px; justify-content:center;
+  font-weight:650; margin-bottom:20px; letter-spacing:.2px; }
+.dot { width:9px; height:9px; border-radius:50%; background:var(--ok); }
+.card { background: linear-gradient(180deg, #111a2e 0%, #16223a 100%); border:1px solid var(--line);
+  border-radius:16px; padding:22px; box-shadow: 0 20px 44px -30px rgba(0,0,0,.9); }
+h1 { font-size:20px; margin:0 0 6px; }
+p.lead { color:var(--muted); margin:0 0 18px; font-size:14px; }
+label { display:block; font-size:12px; color:var(--muted); margin:12px 0 5px; }
+input[type=password] { width:100%; padding:11px 13px; border-radius:10px; background:#0c1526;
+  border:1px solid var(--line); color:var(--text); font:inherit; }
+input[type=password]:focus { outline:2px solid rgba(94,234,212,.35); border-color:var(--accent); }
+button { font:inherit; font-weight:600; padding:11px 18px; border-radius:10px; border:0;
+  background:var(--accent); color:#062016; cursor:pointer; margin-top:18px; }
+button.ghost { background:transparent; color:var(--text); border:1px solid var(--line); }
+.flash { border-radius:11px; padding:11px 13px; margin-bottom:12px; font-size:14px; border:1px solid; }
+.flash.error { background:rgba(248,113,113,.1); border-color:rgba(248,113,113,.4); }
+.flash.ok { background:rgba(52,211,153,.09); border-color:rgba(52,211,153,.35); }
+.flash.warn { background:rgba(251,191,36,.09); border-color:rgba(251,191,36,.35); }
+.kv { display:flex; justify-content:space-between; gap:14px; padding:8px 0;
+  border-top:1px solid rgba(35,48,77,.6); font-size:13px; }
+.kv span:first-child { color:var(--muted); }
+.kv span:last-child { font-family:var(--mono); font-size:12.5px; text-align:right; word-break:break-all; }
+code { font-family:var(--mono); font-size:12.5px; background:#0a1220; padding:1px 5px;
+  border-radius:5px; border:1px solid var(--line); }
+ol { padding-left:20px; color:var(--muted); font-size:14px; }
+ol li { margin:6px 0; }
+ol b { color:var(--text); }
+a { color:var(--accent); }
+.foot { color:var(--muted); font-size:12px; text-align:center; margin-top:22px; }
 </style>
 </head>
 <body>
 <div class="wrap">
+  <div class="brand"><span class="dot"></span> site_bridge setup</div>
+
+<?php if ($done): ?>
   <div class="card">
-    <h1>site_bridge — setup</h1>
-    <p class="muted">One-time installation: tables, then the admin password.
-    Delete this file when it says it is done.</p>
-
-    <?php foreach ($messages as $item): ?>
-      <div class="flash <?= sb_escape($item[0]) ?>"><?= sb_escape($item[1]) ?></div>
-    <?php endforeach; ?>
-
-    <?php if ($done): ?>
-      <div class="flash ok">Installed. The panel is ready.</div>
-      <p><a href="index.php">Open the panel →</a></p>
-      <h2>Now delete setup.php</h2>
-      <p>The tables and password are stored; this file can only install again if the
-      password were removed, and leaving it online is an unnecessary door.</p>
-    <?php elseif ($installed): ?>
-      <div class="flash ok">Already installed.</div>
-      <p><a href="index.php">Open the panel →</a> Sign in with the password you chose.</p>
-      <h2>Delete setup.php</h2>
-      <p>You are seeing this because the file is still on the server. Remove it.</p>
-    <?php elseif ($fatal !== ''): ?>
-      <div class="flash error"><?= sb_escape($fatal) ?></div>
-      <h2>Create the credentials file</h2>
-      <p>In VistaPanel (or your host's control panel) open <b>MySQL Databases</b> and
-      note the host, database name and user. Then create this file — ideally one
-      level <b>above</b> your web root, so it cannot be downloaded:</p>
-      <pre>// <?= sb_escape($secretsPath) ?>
-
-&lt;?php
-return [
-    'db' =&gt; [
-        'host' =&gt; 'sqlXXX.infinityfree.com',   // from the control panel
-        'user' =&gt; 'if0_XXXXXXXX',
-        'pass' =&gt; 'your database password',
-        'name' =&gt; 'if0_XXXXXXXX_bridge',
-        'port' =&gt; 3306,
-    ],
-    'root' =&gt; __DIR__ . '/htdocs',   // the folder the agent may touch
-    'allow_php' =&gt; false,            // set true to allow op=php
-    'databases' =&gt; [                // optional: extra DBs for op=sql
-        'main' =&gt; [
-            'host' =&gt; 'sqlXXX.infinityfree.com',
-            'user' =&gt; 'if0_XXXXXXXX',
-            'pass' =&gt; 'your database password',
-            'name' =&gt; 'if0_XXXXXXXX_bridge',
-        ],
-    ],
-];</pre>
-      <p class="muted">Then reload this page. <code>bridge.secrets.example.php</code>
-      in the repository is the same file with comments.</p>
-    <?php else: ?>
-      <h2>Choose the admin password</h2>
-      <p class="muted">Stored as a bcrypt hash in <code>sb_settings</code>; it is the
-      only way into the panel. Nothing else is needed — the tables are created below.</p>
-      <form method="post" autocomplete="off">
-        <input type="hidden" name="csrf" value="<?= sb_escape((string) $_SESSION['csrf']) ?>">
-        <label for="password">Password (10+ characters)</label>
-        <input type="password" id="password" name="password" required minlength="10" autofocus>
-        <label for="again">Repeat it</label>
-        <input type="password" id="again" name="again" required minlength="10">
-        <button type="submit">Create tables and set password</button>
-      </form>
-
-      <h2>Before you continue</h2>
-      <div class="step"><div class="num">1</div><div>
-        <b>Credentials</b><br><span class="muted">using <code><?= sb_escape($secretsPath) ?></code></span>
-      </div></div>
-      <div class="step"><div class="num">2</div><div>
-        <b>PHP snippets</b><br><span class="muted">currently
-        <?= !empty(sb_setting('allow_php', false)) ? 'enabled' : 'disabled' ?>
-        (allow_php in bridge.secrets.php)</span>
-      </div></div>
-      <div class="step"><div class="num">3</div><div>
-        <b>The AI gets a token, not this password</b><br>
-        <span class="muted">Tokens are issued in the panel, expire on their own, and
-        can be revoked without touching anything else.</span>
-      </div></div>
-    <?php endif; ?>
+    <h1>You are set up</h1>
+    <p class="lead">The password is written. Nothing here needs a database.</p>
+    <div class="flash ok"><b>Delete setup.php now</b> — it refuses to run again while a password
+      exists, but leaving it on the server has no upside.</div>
+    <div class="kv"><span>state file</span><span><?= h($statePath) ?></span></div>
+    <div class="kv"><span>web root</span><span><?= $sameFolder ? 'state file is inside it' : 'state file is above it' ?></span></div>
+    <div class="kv"><span>state protection</span><span><?= h($guardNote) ?></span></div>
+    <ol style="margin-top:16px">
+      <li>Delete <code>setup.php</code> from the server.</li>
+      <li>Open <a href="index.php">index.php</a> and sign in.</li>
+      <li>Create a token there and give its URL to your agent.</li>
+    </ol>
+    <div style="margin-top:16px"><a href="index.php"><button type="button">Open the panel</button></a></div>
   </div>
-  <p class="muted" style="text-align:center">site_bridge v<?= sb_escape(SB_VERSION) ?> ·
-    PHP <?= sb_escape(PHP_VERSION) ?></p>
+
+<?php elseif ($installed): ?>
+  <div class="card">
+    <h1>Already installed</h1>
+    <p class="lead">A password exists, so this page will not overwrite it.</p>
+    <div class="kv"><span>state file</span><span><?= h($statePath) ?></span></div>
+    <div class="kv"><span>installed</span><span><?= $state['password_hash'] !== '' ? 'hashed' : 'plain (will be hashed on first sign-in)' ?></span></div>
+    <ol style="margin-top:16px">
+      <li><b>Forgot the password?</b> Fetch <code>bridge_state.json</code> over FTP, set
+        <code>"password_hash"</code> and <code>"password_plain"</code> to empty strings, upload it
+        back, then reload this page and pick a new one.</li>
+      <li><b>Not your install?</b> Then someone else got here first: clear the state file and
+        redo setup immediately.</li>
+      <li>Otherwise <a href="index.php">open the panel</a> and delete <code>setup.php</code>.</li>
+    </ol>
+    <div class="flash warn">Only edit the JSON while the panel is closed, so both sides do not
+      write at the same moment.</div>
+  </div>
+
+<?php else: ?>
+  <div class="card">
+    <h1>Pick an administrator password</h1>
+    <p class="lead">This is the first run. The password unlocks the panel where you create
+      tokens for the agent; it is stored as a hash in the state file, not in a database.</p>
+
+    <?php foreach ($problems as $problem): ?>
+      <div class="flash error"><?= h($problem) ?></div>
+    <?php endforeach; ?>
+    <?php if (!$folderWritable): ?>
+      <div class="flash error">The folder <code><?= h($folder) ?></code> is not writable, so the
+        password cannot be saved. Set it to 755 (or 775) and reload.</div>
+    <?php endif; ?>
+
+    <form method="post" autocomplete="off">
+      <label for="password">Password (8+ characters)</label>
+      <input type="password" id="password" name="password" required minlength="8" autofocus>
+      <label for="again">Repeat it</label>
+      <input type="password" id="again" name="again" required minlength="8">
+      <button type="submit" <?= $folderWritable ? '' : 'disabled' ?>>Save and finish</button>
+    </form>
+
+    <div style="margin-top:18px">
+      <div class="kv"><span>state file</span><span><?= h($statePath) ?></span></div>
+      <div class="kv"><span>kept</span><span>password hash · tokens · settings · activity log</span></div>
+      <div class="kv"><span>factory reset</span><span>delete bridge_state.json and reload</span></div>
+    </div>
+    <p class="foot">No MySQL, no tables, no cron. Three files total.</p>
+  </div>
+<?php endif; ?>
 </div>
 </body>
 </html>
