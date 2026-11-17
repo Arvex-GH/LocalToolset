@@ -812,8 +812,12 @@ function bridge_job_tick(array $job, string $id): string
     $GLOBALS['BRIDGE_TICK_DEADLINE'] = microtime(true) + BRIDGE_TICK_SECONDS;
     $output = '';
     $error = '';
-    ob_start();
+    // Level BEFORE the buffer, or the collect loop below never runs and the
+    // snippet's echo flushes past the envelope at shutdown.
     $level = ob_get_level();
+    ob_start();
+    $displayErrors = (string) ini_get('display_errors');
+    @ini_set('display_errors', '1');
     // The snippet names these two directly, so they must be references to the
     // globals; a local copy would swallow every bit of progress.
     $BRIDGE_STATE = &$GLOBALS['BRIDGE_STATE'];
@@ -823,8 +827,9 @@ function bridge_job_tick(array $job, string $id): string
     } catch (Throwable $exc) {
         $error = get_class($exc) . ': ' . $exc->getMessage();
     }
+    @ini_set('display_errors', $displayErrors === '' ? '0' : $displayErrors);
     while (ob_get_level() > $level) {
-        $output .= (string) ob_get_clean();
+        $output = (string) ob_get_clean() . $output;
     }
     if ($error !== '') {
         $status = 'failed';
@@ -869,8 +874,10 @@ function bridge_op_php(): void
         $GLOBALS['BRIDGE_TICK_DEADLINE'] = microtime(true) + BRIDGE_TICK_SECONDS + 2.0;
         $output = '';
         $error = '';
-        ob_start();
         $level = ob_get_level();
+        ob_start();
+        $displayErrors = (string) ini_get('display_errors');
+        @ini_set('display_errors', '1');
         $BRIDGE_STATE = &$GLOBALS['BRIDGE_STATE'];
         $BRIDGE_DONE = &$GLOBALS['BRIDGE_DONE'];
         try {
@@ -878,8 +885,9 @@ function bridge_op_php(): void
         } catch (Throwable $exc) {
             $error = get_class($exc) . ': ' . $exc->getMessage();
         }
+        @ini_set('display_errors', $displayErrors === '' ? '0' : $displayErrors);
         while (ob_get_level() > $level) {
-            $output .= (string) ob_get_clean();
+            $output = (string) ob_get_clean() . $output;
         }
         if ($error !== '') {
             bridge_summary('php snippet failed');
@@ -1045,6 +1053,10 @@ function bridge_boot(): void
             . "note: the request died on the server; check the panel's activity log\n";
     });
 
+    // A warning printed by PHP would land above the envelope and hide the
+    // header the agent parses. Snippet runs switch this back on inside their
+    // own buffer, so their warnings still reach the body.
+    @ini_set('display_errors', '0');
     @set_time_limit(20);
 
     if (is_file(__DIR__ . '/bridge.disabled')) {

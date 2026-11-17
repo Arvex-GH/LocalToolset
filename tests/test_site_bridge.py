@@ -256,6 +256,24 @@ class StateTests(unittest.TestCase):
                 text = source(name)
                 self.assertIn("'sb_' . bin2hex(random_bytes(24))", text, name)
 
+    def test_snippet_output_is_captured_not_leaked(self):
+        # Capturing ob_get_level() after ob_start() makes the drain loop a
+        # no-op: the snippet's echo then flushes past the envelope at shutdown,
+        # which is exactly the bug this test exists to stop coming back.
+        bridge = source('bridge.php')
+        self.assertEqual(bridge.count('ob_start();'), 2)
+        for match in re.finditer(r'\$level = ob_get_level\(\);\s*\n\s*ob_start\(\);', bridge):
+            self.assertIsNotNone(match)
+        self.assertEqual(len(re.findall(r'\$level = ob_get_level\(\);\s*\n\s*ob_start\(\);',
+                                        bridge)), 2)
+        self.assertIsNone(re.search(r'ob_start\(\);\s*\n\s*\$level', bridge))
+        self.assertIn('ob_get_clean()', bridge)
+
+    def test_warnings_cannot_corrupt_the_envelope(self):
+        bridge = source('bridge.php')
+        self.assertIn("ini_set('display_errors', '0')", bridge)
+        self.assertEqual(bridge.count("ini_set('display_errors', '1')"), 2)
+
     def test_php_snippets_stay_opt_in(self):
         bridge = source('bridge.php')
         self.assertIn("bridge_setting('allow_php', false)", bridge)
