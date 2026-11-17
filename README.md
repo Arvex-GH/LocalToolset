@@ -28,7 +28,7 @@ Start here:
   archived but still working; its schema and wait SQL live beside it.
 - `shared/actions.py` — file, path-confinement and MCP helpers used by both.
 - `site_bridge/` — the PHP variant for a website on shared hosting (PHP only, no
-  shell, no database, ~10 s per request). Exactly three files: `bridge.php`
+  shell, no database). Exactly three files: `bridge.php`
   (token-gated endpoint: `ls`, `read`, `write`, `edit`, `mkdir`, `rm`, `upload`,
   opt-in `php`, `job`/`jobs`/`cancel` for work longer than one request, and
   `ping`/`help`/`selftest`), `index.php` (password-protected panel:
@@ -37,7 +37,10 @@ Start here:
   three into `htdocs`, open `setup.php` once, sign in, create a token, hand the
   agent `https://<your-site>/bridge.php?t=<token>&op=help`. State is one
   `bridge_state.json` — password hash, tokens, settings, activity — kept above
-  the web root when the host allows it.
+  the web root when the host allows it; where it cannot be, `setup.php` writes a
+  deny-all `.htaccess` and the file answers 403 instead of leaking the hash and
+  the tokens. Verified end-to-end on InfinityFree (PHP 8.4.27, no `shell_exec`):
+  file ops, `op=php`, multi-tick jobs, output paging and the deny rule.
 - `prompt.md` / `fetch_bridge/prompt.md` — paste-in prompts for each transport.
 
 Tests: `python -m unittest discover -s tests -v`.
