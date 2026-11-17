@@ -1,13 +1,13 @@
-"""Static checks for site_bridge/*.php.
+"""Static checks for the three site_bridge PHP files.
 
 There is no PHP interpreter on the build machine, and the deploy target (shared
 hosting) is exactly where a stray brace shows up as a blank 500 with no message.
 So these tests parse the PHP the way a compiler would: strip comments and string
-literals with a small lexer, then assert the code that remains is balanced and
-that the files agree with each other and with the docs.
+literals with a small lexer, then assert that what remains is balanced and that
+the three files agree with each other and with the docs.
 
-They are not a substitute for running the thing — the first deploy still ends
-with op=selftest — but they catch the failures that cost an upload each.
+The design under test is the simplified one: no database, no shared include,
+three files, one JSON state file.
 """
 import re
 import unittest
@@ -15,14 +15,20 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 BRIDGE_DIR = ROOT / 'site_bridge'
-PHP_FILES = ['bridge_lib.php', 'bridge.php', 'index.php', 'setup.php',
-             'bridge.secrets.example.php']
-# Files that are pure PHP and must not emit anything outside their own envelope.
-PHP_ONLY = ['bridge_lib.php', 'bridge.php', 'bridge.secrets.example.php']
+PHP_FILES = ['bridge.php', 'index.php', 'setup.php']
+# bridge.php is the machine-facing endpoint: it must never emit anything that is
+# not its own envelope, so it does not close the PHP tag.
+PHP_ONLY = ['bridge.php']
+OPS = ['ping', 'help', 'selftest', 'ls', 'read', 'write', 'edit', 'mkdir', 'rm',
+       'upload', 'php', 'job', 'jobs', 'cancel']
 
 
 def php_files(names):
     return [(name, (BRIDGE_DIR / name).read_text(encoding='utf-8')) for name in names]
+
+
+def source(name):
+    return (BRIDGE_DIR / name).read_text(encoding='utf-8')
 
 
 class PhpLexer:
@@ -37,8 +43,8 @@ class PhpLexer:
     TAG_OPEN = '<?php'
     TAG_ECHO = '<?='
 
-    def __init__(self, source):
-        self.source = source
+    def __init__(self, text):
+        self.source = text
         self.errors = []
         self.regions = self._regions()
         self.code = self.strip()
@@ -66,10 +72,7 @@ class PhpLexer:
         return regions
 
     def strip(self):
-        code_parts = []
-        for text, line in self.regions:
-            code_parts.append(self._strip_region(text, line))
-        return '\n'.join(code_parts)
+        return '\n'.join(self._strip_region(text, line) for text, line in self.regions)
 
     def _strip_region(self, src, base_line):
         out = []
@@ -150,152 +153,197 @@ def balanced(code):
 
 class LexerTests(unittest.TestCase):
     def test_the_lexer_notices_the_failures_it_is_meant_to(self):
-        for source in ('<?php echo "unterminated;', '<?php /* open', '<?php $x = <<<TXT\nabc\n'):
-            with self.subTest(source=source):
-                self.assertTrue(PhpLexer(source).errors)
+        for text in ('<?php echo "unterminated;', '<?php /* open', '<?php $x = <<<TXT\nabc\n'):
+            with self.subTest(source=text):
+                self.assertTrue(PhpLexer(text).errors)
 
     def test_the_lexer_ignores_brackets_inside_strings_and_comments(self):
-        source = '<?php $a = "}{"; // }}\n/* { */ $b = 1;'
-        lexer = PhpLexer(source)
+        text = '<?php $a = "}{"; // }}\n/* { */ $b = 1;'
+        lexer = PhpLexer(text)
         self.assertEqual(lexer.errors, [])
         self.assertTrue(balanced(lexer.code)[0])
 
+    def test_html_outside_php_is_not_parsed_as_code(self):
+        lexer = PhpLexer('<style>.a{}</style><?php if (true): ?>x<?php endif; ?><script>if(a){b()}</script>')
+        self.assertTrue(balanced(lexer.code)[0])
+        self.assertEqual(len(lexer.regions), 2)
 
-class PhpFileTests(unittest.TestCase):
-    def test_every_file_exists_and_is_php(self):
+
+class LayoutTests(unittest.TestCase):
+    def test_exactly_three_php_files(self):
+        found = sorted(path.name for path in BRIDGE_DIR.glob('*.php'))
+        self.assertEqual(found, sorted(PHP_FILES))
+
+    def test_every_file_exists_and_starts_with_php(self):
         for name in PHP_FILES:
             with self.subTest(file=name):
-                path = BRIDGE_DIR / name
-                self.assertTrue(path.is_file(), '%s is missing' % name)
-                self.assertTrue(path.read_text(encoding='utf-8').startswith('<?php'), name)
+                self.assertTrue(source(name).startswith('<?php'), name)
 
-    def test_php_only_files_never_close_the_tag(self):
-        for name, source in php_files(PHP_ONLY):
+    def test_the_endpoint_never_closes_the_php_tag(self):
+        for name, text in php_files(PHP_ONLY):
             with self.subTest(file=name):
-                self.assertNotIn('?>', source, '%s must not close the PHP tag' % name)
+                self.assertNotIn('?>', text, '%s must not close the PHP tag' % name)
 
-    def test_templates_end_with_html_not_php(self):
+    def test_templates_end_with_html(self):
         for name in ('index.php', 'setup.php'):
             with self.subTest(file=name):
-                source = (BRIDGE_DIR / name).read_text(encoding='utf-8')
-                self.assertTrue(source.rstrip().endswith('</html>'), name)
+                self.assertTrue(source(name).rstrip().endswith('</html>'), name)
 
     def test_every_region_balances_on_its_own(self):
-        for name, source in php_files(PHP_FILES):
+        for name, text in php_files(PHP_FILES):
             with self.subTest(file=name):
-                lexer = PhpLexer(source)
+                lexer = PhpLexer(text)
                 self.assertEqual(lexer.errors, [], name)
                 self.assertGreaterEqual(len(lexer.regions), 1, name)
-                for text, line in lexer.regions:
-                    code = lexer._strip_region(text, line)
-                    ok, detail = balanced(code)
+                for region, line in lexer.regions:
+                    ok, detail = balanced(lexer._strip_region(region, line))
                     self.assertTrue(ok, '%s: region at line %d: %s' % (name, line, detail))
 
     def test_no_short_open_tags(self):
-        for name, source in php_files(PHP_FILES):
+        for name, text in php_files(PHP_FILES):
             with self.subTest(file=name):
-                self.assertNotIn('<? ', source.replace('<?php', ''), name)
+                self.assertNotIn('<? ', text.replace('<?php', ''), name)
+
+    def test_files_do_not_include_each_other(self):
+        # Deliberate duplication: a half-finished upload of one file must not
+        # take the other two down with it.
+        for name, text in php_files(PHP_FILES):
+            with self.subTest(file=name):
+                code = PhpLexer(text).code
+                self.assertIsNone(re.search(r'\b(?:require|include)(?:_once)?\b', code), name)
+
+
+class NoDatabaseTests(unittest.TestCase):
+    def test_nothing_touches_a_database(self):
+        for name, text in php_files(PHP_FILES):
+            with self.subTest(file=name):
+                code = PhpLexer(text).code.lower()
+                for word in ('mysqli', 'pdo', 'mysql_', 'sb_tokens', 'sb_settings',
+                             'sb_activity', 'bridge_lib', 'bridge.secrets'):
+                    self.assertNotIn(word, code, '%s mentions %s' % (name, word))
 
     def test_nothing_calls_a_process_function(self):
-        for name, source in php_files(PHP_FILES):
+        for name, text in php_files(PHP_FILES):
             with self.subTest(file=name):
-                code = PhpLexer(source).code
+                code = PhpLexer(text).code
                 for call in ('shell_exec(', 'proc_open(', 'popen(', 'system(', 'passthru('):
                     self.assertNotIn(call, code, '%s calls %s' % (name, call))
                 self.assertIsNone(re.search(r'(?<![>\w])exec\s*\(', code), name)
 
-    def test_installed_check_and_password_hash_are_present(self):
-        panel = (BRIDGE_DIR / 'index.php').read_text(encoding='utf-8')
-        setup = (BRIDGE_DIR / 'setup.php').read_text(encoding='utf-8')
-        self.assertIn('password_verify', panel)
-        self.assertIn('password_hash', setup)
-        self.assertIn('httponly', panel)
-        self.assertIn('hash_equals', panel)
-        self.assertIn('hash_equals', setup)
+    def test_state_file_is_the_only_storage(self):
+        for name in PHP_FILES:
+            with self.subTest(file=name):
+                self.assertIn('bridge_state.json', source(name), name)
 
 
-class TokenAndSchemaTests(unittest.TestCase):
-    def setUp(self):
-        self.lib = (BRIDGE_DIR / 'bridge_lib.php').read_text(encoding='utf-8')
-        self.bridge = (BRIDGE_DIR / 'bridge.php').read_text(encoding='utf-8')
+class StateTests(unittest.TestCase):
+    def test_bridge_and_panel_agree_on_the_state_keys(self):
+        for name, text in php_files(PHP_FILES):
+            with self.subTest(file=name):
+                for key in ('password_hash', 'tokens', 'activity'):
+                    self.assertIn("'%s'" % key, text, '%s does not mention %s' % (name, key))
+
+    def test_state_is_written_under_a_lock_and_locked_down(self):
+        for name in PHP_FILES:
+            with self.subTest(file=name):
+                text = source(name)
+                self.assertIn('flock(', text, name)
+                self.assertIn('0600', text, name)
 
     def test_tokens_are_long_and_url_safe(self):
-        self.assertIn("const SB_TOKEN_PREFIX = 'sb_';", self.lib)
-        self.assertIn("bin2hex(random_bytes(24))", self.lib)
-        # 3 + 48 characters, every one of them an unreserved URL character.
-        pattern = re.search(r"SB_TOKEN_PREFIX \. bin2hex\(random_bytes\(24\)\)", self.lib)
-        self.assertIsNotNone(pattern, 'token construction changed')
+        for name in ('bridge.php', 'index.php'):
+            with self.subTest(file=name):
+                text = source(name)
+                self.assertIn("'sb_' . bin2hex(random_bytes(24))", text, name)
 
-    def test_only_hashes_are_stored(self):
-        self.assertIn("hash('sha256', $token)", self.lib)
-        schema = self.lib
-        self.assertIn('token_hash CHAR(64) NOT NULL UNIQUE', schema)
-        self.assertNotIn('token_value', schema)
-
-    def test_every_table_the_code_touches_is_created_by_the_schema(self):
-        created = set(re.findall(r'CREATE TABLE IF NOT EXISTS (\w+)', self.lib))
-        self.assertEqual(created, {'sb_settings', 'sb_tokens', 'sb_activity'})
-        for name, source in (('lib', self.lib), ('bridge', self.bridge),
-                             ('panel', (BRIDGE_DIR / 'index.php').read_text(encoding='utf-8'))):
-            used = set(re.findall(r'\b(?:FROM|INTO|UPDATE|TABLE)\s+(sb_\w+)', source))
-            self.assertTrue(used <= created, '%s references uncreated tables: %s'
-                            % (name, used - created))
-
-    def test_schema_is_idempotent(self):
-        self.assertEqual(self.lib.count('CREATE TABLE IF NOT EXISTS'), 3)
-
-    def test_token_lookup_ignores_expired_and_revoked_rows(self):
-        self.assertIn("revoked_at", self.lib)
-        self.assertIn("expires_at", self.lib)
-        self.assertIn('sb_token_lookup', self.bridge)
+    def test_php_snippets_stay_opt_in(self):
+        bridge = source('bridge.php')
+        self.assertIn("bridge_setting('allow_php', false)", bridge)
+        self.assertIn("'allow_php'", source('index.php'))
 
 
-class BridgeContractTests(unittest.TestCase):
+class AuthTests(unittest.TestCase):
+    def test_the_panel_verifies_the_password_and_keeps_a_hash(self):
+        panel = source('index.php')
+        self.assertIn('password_verify', panel)
+        self.assertIn('password_hash(', panel)
+        self.assertIn('hash_equals', panel)
+
+    def test_the_session_cookie_is_hardened(self):
+        panel = source('index.php')
+        self.assertIn('httponly', panel.lower())
+        self.assertIn('samesite', panel.lower())
+        self.assertIn('session_regenerate_id(true)', panel)
+
+    def test_posts_are_csrf_checked(self):
+        panel = source('index.php')
+        self.assertIn('function require_csrf', panel)
+        self.assertGreaterEqual(panel.count('name="csrf"'), 6)
+
+    def test_login_is_throttled(self):
+        self.assertIn('>= 10', source('index.php'))
+
+    def test_setup_refuses_to_run_twice(self):
+        setup = source('setup.php')
+        self.assertIn('$installed', setup)
+        self.assertIn("if (!$installed && $_SERVER['REQUEST_METHOD'] === 'POST')", setup)
+        self.assertIn('password_hash(', setup)
+
+    def test_the_endpoint_rejects_bad_tokens_and_logs_it(self):
+        bridge = source('bridge.php')
+        self.assertIn('401', bridge)
+        self.assertIn('429', bridge)
+        self.assertIn("bridge_record('auth', 'unauthorized'", bridge)
+
+
+class ContractTests(unittest.TestCase):
     def setUp(self):
-        self.bridge = (BRIDGE_DIR / 'bridge.php').read_text(encoding='utf-8')
-        self.readme = (BRIDGE_DIR / 'README.md').read_text(encoding='utf-8')
+        self.bridge = source('bridge.php')
+        self.readme = (ROOT / 'README.md').read_text(encoding='utf-8')
 
     def ops_in_code(self):
         return set(re.findall(r"case '([a-z]+)':", self.bridge))
 
-    def test_the_readme_documents_every_op(self):
-        ops = self.ops_in_code()
-        self.assertTrue(ops)
-        for op in sorted(ops):
-            with self.subTest(op=op):
-                self.assertIn(op, self.readme)
+    def test_the_ops_are_the_expected_set(self):
+        self.assertEqual(self.ops_in_code(), set(OPS))
 
     def test_every_op_has_a_function(self):
         for op in sorted(self.ops_in_code()):
             with self.subTest(op=op):
-                self.assertIn('bridge_op_' + op + '(', self.bridge)
+                self.assertIn('function bridge_op_' + op + '(', self.bridge)
 
-    def test_help_card_documents_the_ops_it_serves(self):
-        help_text = self.bridge[self.bridge.index('function bridge_help'):]
+    def test_help_teaches_every_op(self):
+        help_text = self.bridge[self.bridge.index('function bridge_help('):]
         help_text = help_text[:help_text.index('function bridge_op_selftest')]
         for op in sorted(self.ops_in_code()):
             with self.subTest(op=op):
                 self.assertIn(op, help_text)
 
-    def test_logging_happens_on_every_response(self):
-        self.assertIn('sb_log(', self.bridge)
-        respond = self.bridge[self.bridge.index('function bridge_respond'):]
-        respond = respond[:respond.index('function bridge_params_summary')]
-        self.assertIn('sb_log(', respond)
+    def test_the_readme_documents_every_op(self):
+        for op in sorted(self.ops_in_code()):
+            with self.subTest(op=op):
+                self.assertIn(op, self.readme)
 
-    def test_unauthorized_requests_are_logged_and_throttled(self):
-        self.assertIn('sb_recent_auth_failures', self.bridge)
-        self.assertIn('429', self.bridge)
-        self.assertIn('401', self.bridge)
+    def test_the_envelope_shape_is_stable(self):
+        self.assertIn("'BRIDGE v' . BRIDGE_VERSION", self.bridge)
+        self.assertIn("'status=' . $status", self.bridge)
+        self.assertIn("$_GET['format']", self.bridge)
+        self.assertIn('format=json', self.bridge)
 
-    def test_php_snippets_are_opt_in(self):
-        self.assertIn("if (empty($config['allow_php']))", self.bridge)
-        example = (BRIDGE_DIR / 'bridge.secrets.example.php').read_text(encoding='utf-8')
-        self.assertIn("'allow_php' => false", example)
+    def test_every_response_is_logged(self):
+        start = self.bridge.index('function bridge_respond')
+        end = self.bridge.index('\nfunction ', start + 10)
+        self.assertIn('bridge_record(', self.bridge[start:end])
 
     def test_file_ops_stay_inside_the_root(self):
         self.assertIn('function bridge_resolve', self.bridge)
         self.assertIn('path escapes the root', self.bridge)
+
+    def test_the_readme_states_the_no_database_rule(self):
+        lower = self.readme.lower()
+        self.assertIn('no database', lower)
+        for name in PHP_FILES:
+            self.assertIn(name, self.readme)
 
 
 if __name__ == '__main__':

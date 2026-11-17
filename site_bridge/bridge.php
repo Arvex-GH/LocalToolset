@@ -3,24 +3,21 @@
  * bridge.php — the endpoint the AI fetches.
  *
  *   GET bridge.php?t=<token>&op=<op>&<params>
- *   GET bridge.php/x/<token>/<op>        (if the host passes the path through)
+ *   GET bridge.php/x/<token>/<op>
  *
- * Tokens are issued by the admin panel (index.php) and stored as SHA-256 hashes
- * in MySQL, so a token can be created, labelled, given an expiry and revoked
- * without touching any file. Every request is written to sb_activity, which is
- * the log the panel shows live.
+ * No database. Passwords, tokens and the activity log live in bridge_state.json,
+ * which setup.php writes on first run. Bridge requests append their activity
+ * there, which is what the panel (index.php) shows live.
  *
- * Shared hosting means: no shell, and no request longer than ~10 seconds. So
- * there is no `shell` op (the host disables exec), `php` runs a snippet, `sql`
- * runs queries, and long work is split into ticks (op=php&detach=1, then
- * op=job&id=...). See op=help.
+ * Shared hosting means: no shell, and no request longer than ~10 seconds, so
+ * there is no `shell` op (the host disables exec), `php` runs a snippet, and long
+ * work is split into ticks (op=php&detach=1, then op=job&id=...). See op=help.
  *
- * PHP 7.4+; no syntax newer than that.
+ * PHP 7.4+; self-contained on purpose, so a broken upload can never take two
+ * files down at once.
  */
 
 declare(strict_types=1);
-
-require __DIR__ . '/bridge_lib.php';
 
 const BRIDGE_VERSION = '1';
 const BRIDGE_DEFAULT_LEN = 16384;
@@ -31,10 +28,153 @@ const BRIDGE_MAX_READ = 8388608;
 const BRIDGE_WRITES_PER_MINUTE = 120;
 const BRIDGE_AUTH_FAILURES_PER_MINUTE = 20;
 const BRIDGE_TICK_SECONDS = 5.0;
+const BRIDGE_ACTIVITY_MAX = 400;
 
 $GLOBALS['bridge_responded'] = false;
 $GLOBALS['bridge_started'] = microtime(true);
-$GLOBALS['bridge_context'] = array('token_id' => null, 'op' => '-', 'summary' => '');
+$GLOBALS['bridge_context'] = array('token' => '', 'op' => '-', 'summary' => '');
+$GLOBALS['bridge_state'] = null;
+
+/* ------------------------------------------------------------------- state */
+
+/** bridge_state.json above the web root when possible, beside the files otherwise. */
+function bridge_state_path(): string
+{
+    static $path = null;
+    if ($path !== null) {
+        return $path;
+    }
+    $outside = dirname(__DIR__) . '/bridge_state.json';
+    $inside = __DIR__ . '/bridge_state.json';
+    foreach (array($outside, $inside) as $candidate) {
+        if (is_file($candidate)) {
+            return $path = $candidate;
+        }
+    }
+    if (is_dir(dirname(__DIR__)) && is_writable(dirname(__DIR__))) {
+        return $path = $outside;
+    }
+    return $path = $inside;
+}
+
+function bridge_state_load(): array
+{
+    static $cache = null;
+    if (is_array($cache)) {
+        return $cache;
+    }
+    $empty = array('password_hash' => '', 'password_plain' => '',
+                   'settings' => array(), 'tokens' => array(), 'activity' => array());
+    $path = bridge_state_path();
+    if (!is_file($path)) {
+        return $cache = $empty;
+    }
+    $raw = @file_get_contents($path);
+    $data = $raw === false ? null : json_decode($raw, true);
+    if (!is_array($data)) {
+        return $cache = $empty + array('corrupt' => true);
+    }
+    $data += $empty;
+    if (!is_array($data['settings'])) {
+        $data['settings'] = array();
+    }
+    if (!is_array($data['tokens'])) {
+        $data['tokens'] = array();
+    }
+    if (!is_array($data['activity'])) {
+        $data['activity'] = array();
+    }
+    return $cache = $data;
+}
+
+function bridge_state_save(array $state): bool
+{
+    $path = bridge_state_path();
+    $trimmed = $state;
+    if (!isset($trimmed['settings']) || !is_array($trimmed['settings'])) {
+        $trimmed['settings'] = array();
+    }
+    if (count($trimmed['activity']) > BRIDGE_ACTIVITY_MAX) {
+        $trimmed['activity'] = array_slice($trimmed['activity'], -BRIDGE_ACTIVITY_MAX);
+    }
+    $encoded = json_encode($trimmed, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES
+        | JSON_UNESCAPED_UNICODE | JSON_PARTIAL_OUTPUT_ON_ERROR);
+    if ($encoded === false) {
+        return false;
+    }
+    $handle = @fopen($path, 'c+');
+    if ($handle === false) {
+        return false;
+    }
+    $ok = false;
+    if (flock($handle, LOCK_EX)) {
+        ftruncate($handle, 0);
+        rewind($handle);
+        $ok = fwrite($handle, $encoded) !== false;
+        fflush($handle);
+        flock($handle, LOCK_UN);
+    }
+    fclose($handle);
+    @chmod($path, 0600);
+    $GLOBALS['bridge_state'] = $trimmed;
+    return $ok;
+}
+
+function bridge_installed(): bool
+{
+    $state = bridge_state_load();
+    return $state['password_hash'] !== '' || $state['password_plain'] !== '';
+}
+
+function bridge_new_token(): string
+{
+    return 'sb_' . bin2hex(random_bytes(24));
+}
+
+function bridge_ip(): string
+{
+    foreach (array('HTTP_CF_CONNECTING_IP', 'HTTP_X_FORWARDED_FOR', 'REMOTE_ADDR') as $key) {
+        if (empty($_SERVER[$key])) {
+            continue;
+        }
+        $value = (string) $_SERVER[$key];
+        if ($key === 'HTTP_X_FORWARDED_FOR') {
+            $parts = explode(',', $value);
+            $value = trim($parts[0]);
+        }
+        if (filter_var($value, FILTER_VALIDATE_IP)) {
+            return $value;
+        }
+    }
+    return '0.0.0.0';
+}
+
+function bridge_clip(string $text, int $limit): string
+{
+    $text = str_replace(array("\r", "\n", "\t"), ' ', $text);
+    if (function_exists('mb_substr')) {
+        return mb_substr($text, 0, $limit, 'UTF-8');
+    }
+    return substr($text, 0, $limit);
+}
+
+/**
+ * Settings live in the same JSON as everything else, so the panel can flip
+ * allow_php or narrow the file root without anyone editing a file.
+ */
+function bridge_setting(string $name, $default = null)
+{
+    $state = $GLOBALS['bridge_state'] !== null ? $GLOBALS['bridge_state'] : bridge_state_load();
+    $settings = isset($state['settings']) && is_array($state['settings']) ? $state['settings'] : array();
+    if (!array_key_exists($name, $settings)) {
+        return $default;
+    }
+    $value = $settings[$name];
+    if ($value === '' || $value === null) {
+        return $default;
+    }
+    return $value;
+}
 
 /* ------------------------------------------------------------------ output */
 
@@ -60,11 +200,56 @@ function bridge_headers(string $type): void
     header('Referrer-Policy: no-referrer');
 }
 
+function bridge_params_summary(): string
+{
+    $parts = array();
+    foreach (array('path', 'id', 'tool') as $name) {
+        if (!empty($_GET[$name]) && is_string($_GET[$name])) {
+            $parts[] = $name . '=' . bridge_clip((string) $_GET[$name], 80);
+        }
+    }
+    if (!empty($_GET['code']) && is_string($_GET['code'])) {
+        $parts[] = 'code=' . bridge_clip((string) $_GET['code'], 120);
+    }
+    if (!empty($_GET['text']) && is_string($_GET['text'])) {
+        $parts[] = 'text=' . strlen((string) $_GET['text']) . ' bytes';
+    }
+    if (!empty($_FILES['file']['name'])) {
+        $parts[] = 'file=' . bridge_clip((string) $_FILES['file']['name'], 60);
+    }
+    return $parts ? implode(' ', $parts) : '';
+}
+
+/** Append one activity row to the state file; keeps the newest BRIDGE_ACTIVITY_MAX. */
+function bridge_record(string $op, string $status, int $bytes, string $summary = ''): void
+{
+    $state = $GLOBALS['bridge_state'] !== null ? $GLOBALS['bridge_state'] : bridge_state_load();
+    $activity = $state['activity'];
+    $lastId = 0;
+    if ($activity) {
+        $tail = $activity[count($activity) - 1];
+        $lastId = isset($tail['id']) ? (int) $tail['id'] : 0;
+    }
+    $activity[] = array(
+        'id' => $lastId + 1,
+        'ts' => date('Y-m-d H:i:s'),
+        'op' => $op,
+        'summary' => $summary === '' ? bridge_params_summary() : $summary,
+        'status' => $status,
+        'ms' => (int) round(bridge_elapsed() * 1000),
+        'bytes' => $bytes,
+        'ip' => bridge_ip(),
+        'token' => $GLOBALS['bridge_context']['token'],
+    );
+    $state['activity'] = $activity;
+    bridge_state_save($state);
+}
+
 /**
  * Emit the envelope, record the request, and stop.
  *
- * $fields are extra header tokens (associative: name => value). The body is
- * paged by offset=/len= so a large listing never exceeds one fetch.
+ * $fields are extra header tokens (name => value). The body is paged by
+ * offset=/len= so a big listing never needs more than one fetch.
  */
 function bridge_respond(
     int $code,
@@ -107,24 +292,9 @@ function bridge_respond(
         $lines[] = 'note: ' . $note;
     }
 
-    if (isset($GLOBALS['bridge_link']) && $GLOBALS['bridge_link'] instanceof mysqli) {
-        $summary = $GLOBALS['bridge_context']['summary'];
-        if ($summary === '') {
-            $summary = bridge_params_summary();
-        }
-        sb_log(
-            $GLOBALS['bridge_link'],
-            $GLOBALS['bridge_context']['token_id'],
-            $op,
-            $summary,
-            $status,
-            (int) round(bridge_elapsed() * 1000),
-            strlen($chunk)
-        );
-    }
+    bridge_record($op, $status, strlen($chunk));
 
-    $format = isset($_GET['format']) ? strtolower((string) $_GET['format']) : '';
-    if ($format === 'json') {
+    if (isset($_GET['format']) && strtolower((string) $_GET['format']) === 'json') {
         bridge_headers('application/json; charset=utf-8');
         http_response_code($code);
         echo json_encode(array(
@@ -148,27 +318,6 @@ function bridge_respond(
     }
     $GLOBALS['bridge_responded'] = true;
     exit;
-}
-
-/** A compact, human-readable trace of the request for the activity log. */
-function bridge_params_summary(): string
-{
-    $parts = array();
-    foreach (array('path', 'q', 'tool', 'id') as $name) {
-        if (!empty($_GET[$name]) && is_string($_GET[$name])) {
-            $parts[] = $name . '=' . sb_clip((string) $_GET[$name], 80);
-        }
-    }
-    if (!empty($_GET['code']) && is_string($_GET['code'])) {
-        $parts[] = 'code=' . sb_clip((string) $_GET['code'], 120);
-    }
-    if (!empty($_GET['text']) && is_string($_GET['text'])) {
-        $parts[] = 'text=' . strlen((string) $_GET['text']) . ' bytes';
-    }
-    if (!empty($_FILES['file']['name'])) {
-        $parts[] = 'file=' . sb_clip((string) $_FILES['file']['name'], 60);
-    }
-    return $parts ? implode(' ', $parts) : '';
 }
 
 function bridge_fail(string $op, string $message, int $code = 200, string $id = '-'): void
@@ -231,24 +380,11 @@ function bridge_param(string $name, string $default = ''): string
     return (string) $_GET[$name];
 }
 
-function bridge_json_param(string $name, $default)
-{
-    $raw = bridge_param($name);
-    if ($raw === '') {
-        return $default;
-    }
-    $decoded = json_decode($raw, true);
-    if ($decoded === null && strtolower(trim($raw)) !== 'null') {
-        bridge_fail('params', 'parameter "' . $name . '" must be valid JSON');
-    }
-    return $decoded;
-}
-
 /* ------------------------------------------------------------------- paths */
 
 function bridge_root(): string
 {
-    $root = sb_setting('root', __DIR__);
+    $root = bridge_setting('root', __DIR__);
     $real = realpath((string) $root);
     if ($real === false || !is_dir($real)) {
         throw new RuntimeException('configured root does not exist: ' . $root);
@@ -267,8 +403,7 @@ function bridge_resolve(string $relative, bool $mustExist = false): string
         bridge_fail('path', 'paths are relative to the root: ' . $root);
     }
     $candidate = $root . '/' . $relative;
-    $exists = file_exists($candidate);
-    if ($exists) {
+    if (file_exists($candidate)) {
         $resolved = realpath($candidate);
         if ($resolved === false) {
             bridge_fail('path', 'cannot resolve: ' . $relative);
@@ -296,7 +431,7 @@ function bridge_op_ping(): void
 {
     bridge_summary('liveness check');
     bridge_respond(200, 'completed', 'ping', '-', array('php' => PHP_VERSION),
-        "pong\nsite_bridge v" . SB_VERSION . ' on PHP ' . PHP_VERSION . "\n");
+        "pong\nsite_bridge v" . BRIDGE_VERSION . ' on PHP ' . PHP_VERSION . "\n");
 }
 
 function bridge_op_help(): void
@@ -307,23 +442,20 @@ function bridge_op_help(): void
 
 function bridge_help(): string
 {
-    $config = sb_config();
     $root = bridge_root();
-    $phpAllowed = !empty($config['allow_php']) ? 'enabled' : 'disabled (allow_php in bridge.secrets.php)';
-    $databases = isset($config['databases']) && is_array($config['databases'])
-        ? array_keys($config['databases']) : array();
-    $dbList = $databases ? implode(', ', $databases) : '(none)';
+    $phpAllowed = bridge_setting('allow_php', false) ? 'enabled' : 'disabled (toggle it in the panel)';
     return <<<TXT
 BRIDGE v1 — site bridge (PHP on shared hosting)
-You are talking to a PHP file on the user's website. Each GET is executed there
-with the web server's privileges; the result comes back in this response. There
-is no queue and no daemon: your fetch IS the request.
+You are talking to a PHP file on the user's website. Each GET runs there, with
+the web server's privileges; the result comes back in this response. There is no
+queue and no daemon: your fetch IS the request.
 
 Address
   GET <this file>?t=<token>&op=<op>&<params>
   Also accepted: <path>/x/<token>/<op>, and Authorization: Bearer <token>.
-  The token was issued to the user for one session; when it expires or is
-  revoked every op answers 401 and the panel shows why.
+  The token is one the user issued in the panel; when it expires or is revoked
+  every op answers 401 and the panel shows why.
+  format=json returns this same envelope as one JSON object instead of text.
 
 One request is short
   The host kills a request after about 10 seconds, with no cron and no background
@@ -347,24 +479,25 @@ File root
 Ops
   ping                                  liveness, PHP version
   help                                  this card
-  selftest                              what this host allows, schema and DB health
+  selftest                              what this host allows, and state file health
   ls     path=. [count=100]
   read   path=... [offset= len=]
   write  path=... text=... [mode=create|overwrite|append]
   edit   path=... old=... new=...       (old must match exactly once)
   mkdir  path=...                       (single level; parent must exist)
   rm     path=... [recursive=1]
-  sql    db=NAME q=... [params=[...]]   SELECT returns rows; writes return counts
   php    code=... [detach=1]            run a snippet ({$phpAllowed})
   upload path=... file=<multipart>      write an uploaded file
   jobs   [count=20]                     recent jobs
   job    id=... [offset= len=]          run/continue a tick, page its output
   cancel id=...                         drop a job
 
-Databases: {$dbList}
+There is no sql op: this bridge has no database of its own. If the site needs
+queries, run them through op=php with mysqli and credentials you put in a file
+the agent can read.
 
-Every op is logged to sb_activity with its status, duration and a short summary,
-and appears live in the user's panel. Do not work around a 401 or 429: report it.
+Every op is recorded in bridge_state.json and appears live in the user's panel.
+Do not work around a 401 or 429: report it.
 
 Escaping
   Values are query components: %20 space, %25 %, %26 &, %3D =, %3F ?, %23 #,
@@ -375,13 +508,13 @@ TXT;
 
 function bridge_op_selftest(): void
 {
-    $config = sb_config();
-    $link = $GLOBALS['bridge_link'];
+    $state = bridge_state_load();
+    $path = bridge_state_path();
     $lines = array();
-    $lines[] = 'site_bridge=' . SB_VERSION;
+    $lines[] = 'site_bridge=' . BRIDGE_VERSION;
     $lines[] = 'php=' . PHP_VERSION . ' ' . PHP_SAPI;
     $lines[] = 'extensions=' . implode(',', array_values(array_filter(
-        array('json', 'mysqli', 'mbstring', 'openssl', 'curl', 'zip'),
+        array('json', 'mbstring', 'openssl', 'curl', 'zip'),
         function ($name) {
             return extension_loaded($name);
         }
@@ -391,44 +524,17 @@ function bridge_op_selftest(): void
     $lines[] = 'upload_max_filesize=' . ini_get('upload_max_filesize');
     $lines[] = 'shell_exec=' . (function_exists('shell_exec') ? 'present' : 'disabled by host');
     $lines[] = 'root=' . bridge_root() . ' writable=' . (is_writable(bridge_root()) ? 'yes' : 'no');
-    $lines[] = 'secrets=' . sb_secrets_path();
-    $lines[] = 'secrets_outside_webroot=' . (
-        is_file(dirname(__DIR__) . '/bridge.secrets.php') ? 'yes' : 'no'
+    $lines[] = 'state_file=' . $path;
+    $lines[] = 'state_outside_webroot=' . (
+        dirname($path) !== __DIR__ ? 'yes' : 'no (beside bridge.php; .htaccess must protect it)'
     );
-    $lines[] = 'allow_php=' . (!empty($config['allow_php']) ? 'yes' : 'no');
-    foreach (array('sb_settings', 'sb_tokens', 'sb_activity') as $table) {
-        $result = $link->query('SELECT COUNT(*) AS n FROM ' . $table);
-        $lines[] = $table . '=' . ($result ? (int) $result->fetch_assoc()['n'] . ' rows' : 'missing');
-        if ($result) {
-            $result->free();
-        }
-    }
-    foreach ((isset($config['databases']) ? $config['databases'] : array()) as $name => $db) {
-        $lines[] = 'db[' . $name . ']=' . bridge_probe_db($db);
-    }
+    $lines[] = 'state_writable=' . (is_writable(dirname($path)) || is_writable($path) ? 'yes' : 'no');
+    $lines[] = 'setup_done=' . (bridge_installed() ? 'yes' : 'no — open setup.php');
+    $lines[] = 'tokens=' . count($state['tokens']);
+    $lines[] = 'activity_rows=' . count($state['activity']);
+    $lines[] = 'allow_php=' . (bridge_setting('allow_php', false) ? 'yes' : 'no');
     $lines[] = 'tick_seconds=' . BRIDGE_TICK_SECONDS;
-    bridge_summary('environment and schema check');
     bridge_respond(200, 'completed', 'selftest', '-', array(), implode("\n", $lines) . "\n");
-}
-
-function bridge_probe_db(array $db): string
-{
-    try {
-        $link = @new mysqli(
-            isset($db['host']) ? (string) $db['host'] : 'localhost',
-            isset($db['user']) ? (string) $db['user'] : '',
-            isset($db['pass']) ? (string) $db['pass'] : '',
-            isset($db['name']) ? (string) $db['name'] : '',
-            isset($db['port']) ? (int) $db['port'] : 3306
-        );
-        if ($link->connect_errno) {
-            return 'connect failed: ' . $link->connect_error;
-        }
-        $link->close();
-        return 'ok';
-    } catch (Throwable $exc) {
-        return 'connect failed: ' . $exc->getMessage();
-    }
 }
 
 function bridge_op_ls(): void
@@ -481,8 +587,7 @@ function bridge_op_read(): void
     }
     $size = (int) @filesize($target);
     if ($size > BRIDGE_MAX_READ) {
-        bridge_fail('read', 'file is ' . $size . ' bytes; read it in parts with op=read offset=/len='
-            . ' or fetch it over HTTP');
+        bridge_fail('read', 'file is ' . $size . ' bytes; read it in parts with offset=/len=');
     }
     $data = @file_get_contents($target);
     if ($data === false) {
@@ -499,15 +604,15 @@ function bridge_op_write(): void
         bridge_fail('write', 'write requires path=');
     }
     $text = bridge_param('text');
+    if ($text === '' && isset($_POST['text']) && is_string($_POST['text'])) {
+        $text = (string) $_POST['text'];
+    }
     if (strlen($text) > BRIDGE_MAX_TEXT) {
         bridge_fail('write', 'text exceeds ' . BRIDGE_MAX_TEXT . ' bytes; use mode=append');
     }
     $mode = strtolower(bridge_param('mode', 'create'));
     if (!in_array($mode, array('create', 'overwrite', 'append'), true)) {
         bridge_fail('write', 'mode must be create, overwrite or append');
-    }
-    if ($text === '' && isset($_POST['text']) && is_string($_POST['text'])) {
-        $text = (string) $_POST['text'];
     }
     $target = bridge_resolve($path, false);
     $exists = file_exists($target);
@@ -577,9 +682,8 @@ function bridge_op_rm(): void
         bridge_fail('rm', 'refusing to delete the root');
     }
     $target = bridge_resolve($path, true);
-    $recursive = bridge_param('recursive', '0') === '1';
     if (is_dir($target)) {
-        if (!$recursive) {
+        if (bridge_param('recursive', '0') !== '1') {
             bridge_fail('rm', 'is a directory; add recursive=1: ' . $path);
         }
         $ok = bridge_rm_tree($target);
@@ -615,127 +719,6 @@ function bridge_rm_tree(string $dir): bool
     return @rmdir($dir) && $ok;
 }
 
-function bridge_op_sql(): void
-{
-    $config = sb_config();
-    $databases = isset($config['databases']) && is_array($config['databases'])
-        ? $config['databases'] : array();
-    $name = bridge_param('db');
-    if ($name === '') {
-        $keys = array_keys($databases);
-        $name = $keys ? (string) $keys[0] : '';
-    }
-    if ($name === '' || !isset($databases[$name])) {
-        bridge_fail('sql', 'unknown db "' . $name . '"; configured: '
-            . ($databases ? implode(', ', array_keys($databases)) : '(none)'));
-    }
-    $db = $databases[$name];
-    $query = bridge_param('q');
-    if ($query === '') {
-        bridge_fail('sql', 'sql requires q=');
-    }
-    $params = bridge_json_param('params', array());
-    if (!is_array($params)) {
-        bridge_fail('sql', 'params must be a JSON array');
-    }
-    try {
-        $link = new mysqli(
-            isset($db['host']) ? (string) $db['host'] : 'localhost',
-            isset($db['user']) ? (string) $db['user'] : '',
-            isset($db['pass']) ? (string) $db['pass'] : '',
-            isset($db['name']) ? (string) $db['name'] : '',
-            isset($db['port']) ? (int) $db['port'] : 3306
-        );
-    } catch (Throwable $exc) {
-        bridge_fail('sql', 'connect failed: ' . $exc->getMessage());
-    }
-    if ($link->connect_errno) {
-        bridge_fail('sql', 'connect failed: ' . $link->connect_error);
-    }
-    $link->set_charset('utf8mb4');
-
-    if (!$params) {
-        $result = $link->query($query);
-        if ($result === false) {
-            $error = $link->error;
-            $link->close();
-            bridge_fail('sql', 'query failed: ' . $error);
-        }
-        if ($result === true) {
-            $affected = $link->affected_rows;
-            $link->close();
-            bridge_summary('sql ' . $name . ' ' . sb_clip($query, 100));
-            bridge_respond(200, 'completed', 'sql', '-', array('affected' => $affected),
-                json_encode(array('affected_rows' => $affected), JSON_UNESCAPED_SLASHES) . "\n");
-        }
-        $rows = array();
-        while ($row = $result->fetch_assoc()) {
-            $rows[] = $row;
-        }
-        $result->free();
-        $link->close();
-        bridge_summary('sql ' . $name . ' ' . sb_clip($query, 100));
-        bridge_respond(200, 'completed', 'sql', '-', array('rows' => count($rows)),
-            json_encode(array('rows' => $rows, 'count' => count($rows)),
-                JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_PARTIAL_OUTPUT_ON_ERROR) . "\n");
-    }
-
-    $statement = $link->prepare($query);
-    if (!$statement) {
-        $error = $link->error;
-        $link->close();
-        bridge_fail('sql', 'prepare failed: ' . $error);
-    }
-    $values = array();
-    foreach ($params as $value) {
-        $values[] = $value;
-    }
-    $types = '';
-    foreach ($values as $value) {
-        $types .= is_int($value) ? 'i' : (is_float($value) ? 'd' : 's');
-    }
-    $bind = array($types);
-    foreach ($values as $index => $value) {
-        $bind[] = &$values[$index];
-    }
-    call_user_func_array(array($statement, 'bind_param'), $bind);
-    if (!$statement->execute()) {
-        $error = $statement->error;
-        $statement->close();
-        $link->close();
-        bridge_fail('sql', 'execute failed: ' . $error);
-    }
-    if (!function_exists('mysqli_stmt_get_result')) {
-        $affected = $statement->affected_rows;
-        $statement->close();
-        $link->close();
-        bridge_summary('sql ' . $name . ' ' . sb_clip($query, 100));
-        bridge_respond(200, 'completed', 'sql', '-', array('affected' => $affected),
-            json_encode(array('affected_rows' => $affected,
-                'note' => 'this host cannot return rows from prepared statements')) . "\n");
-    }
-    $result = $statement->get_result();
-    if ($result === false) {
-        $affected = $statement->affected_rows;
-        $statement->close();
-        $link->close();
-        bridge_summary('sql ' . $name . ' ' . sb_clip($query, 100));
-        bridge_respond(200, 'completed', 'sql', '-', array('affected' => $affected),
-            json_encode(array('affected_rows' => $affected), JSON_UNESCAPED_SLASHES) . "\n");
-    }
-    $rows = array();
-    while ($row = $result->fetch_assoc()) {
-        $rows[] = $row;
-    }
-    $result->free();
-    $statement->close();
-    $link->close();
-    bridge_summary('sql ' . $name . ' ' . sb_clip($query, 100));
-    bridge_respond(200, 'completed', 'sql', '-', array('rows' => count($rows)),
-        json_encode(array('rows' => $rows, 'count' => count($rows)),
-            JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_PARTIAL_OUTPUT_ON_ERROR) . "\n");
-}
-
 function bridge_op_upload(): void
 {
     $path = bridge_param('path');
@@ -763,26 +746,23 @@ function bridge_op_upload(): void
 
 /* -------------------------------------------------------------------- jobs */
 
-function bridge_job_path(string $id): string
-{
-    return bridge_state_dir() . '/job-' . $id . '.json';
-}
-
 function bridge_state_dir(): string
 {
-    $dir = sb_setting('state_dir', __DIR__ . '/bridge_state');
-    $dir = rtrim((string) $dir, '/');
+    $dir = rtrim((string) bridge_setting('state_dir', dirname(bridge_state_path()) . '/bridge_jobs'), '/');
     if (!is_dir($dir)) {
         @mkdir($dir, 0700, true);
     }
-    // Job files hold the code an agent asked to run, so ask Apache/LiteSpeed to
-    // refuse them even when the directory happens to sit inside the web root.
     $guard = $dir . '/.htaccess';
     if (is_dir($dir) && !is_file($guard)) {
         @file_put_contents($guard, "Require all denied\n"
             . "<IfModule !mod_authz_core.c>\nOrder allow,deny\nDeny from all\n</IfModule>\n");
     }
     return $dir;
+}
+
+function bridge_job_path(string $id): string
+{
+    return bridge_state_dir() . '/job-' . $id . '.json';
 }
 
 function bridge_job_load(string $id): array
@@ -821,10 +801,9 @@ function bridge_job_append(string $id, string $text): void
 }
 
 /**
- * Run one tick of a job, and return the resulting status.
- *
- * The snippet is re-executed from the top with $BRIDGE_STATE loaded from the job
- * file: PHP cannot suspend a request, so resumption has to be cooperative.
+ * Run one tick of a job. The snippet is re-executed from the top with
+ * $BRIDGE_STATE loaded from the job file: PHP cannot suspend a request, so
+ * resumption has to be cooperative.
  */
 function bridge_job_tick(array $job, string $id): string
 {
@@ -835,8 +814,8 @@ function bridge_job_tick(array $job, string $id): string
     $error = '';
     ob_start();
     $level = ob_get_level();
-    // The snippet names these two directly, so they have to be references to
-    // the globals; a plain copy would swallow every bit of progress.
+    // The snippet names these two directly, so they must be references to the
+    // globals; a local copy would swallow every bit of progress.
     $BRIDGE_STATE = &$GLOBALS['BRIDGE_STATE'];
     $BRIDGE_DONE = &$GLOBALS['BRIDGE_DONE'];
     try {
@@ -863,39 +842,10 @@ function bridge_job_tick(array $job, string $id): string
     return $status;
 }
 
-/** Run a snippet inline, with the same $BRIDGE_STATE / $BRIDGE_DONE contract. */
-function bridge_run_inline(string $code): array
-{
-    $GLOBALS['BRIDGE_STATE'] = array();
-    $GLOBALS['BRIDGE_DONE'] = false;
-    $GLOBALS['BRIDGE_TICK_DEADLINE'] = microtime(true) + BRIDGE_TICK_SECONDS + 2.0;
-    $output = '';
-    $error = '';
-    ob_start();
-    $level = ob_get_level();
-    $BRIDGE_STATE = &$GLOBALS['BRIDGE_STATE'];
-    $BRIDGE_DONE = &$GLOBALS['BRIDGE_DONE'];
-    try {
-        eval($code);
-    } catch (Throwable $exc) {
-        $error = get_class($exc) . ': ' . $exc->getMessage();
-    }
-    while (ob_get_level() > $level) {
-        $output .= (string) ob_get_clean();
-    }
-    return array(
-        'output' => $output,
-        'error' => $error,
-        'done' => !empty($GLOBALS['BRIDGE_DONE']),
-        'state' => is_array($GLOBALS['BRIDGE_STATE']) ? $GLOBALS['BRIDGE_STATE'] : array(),
-    );
-}
-
 function bridge_op_php(): void
 {
-    $config = sb_config();
-    if (empty($config['allow_php'])) {
-        bridge_fail('php', 'php snippets are disabled; set allow_php => true in bridge.secrets.php');
+    if (!bridge_setting('allow_php', false)) {
+        bridge_fail('php', 'php snippets are disabled; the user can enable them in the panel');
     }
     $code = bridge_param('code');
     if ($code === '') {
@@ -914,33 +864,43 @@ function bridge_op_php(): void
     }
 
     if (bridge_param('detach', '0') !== '1') {
-        $run = bridge_run_inline($code);
-        if ($run['error'] !== '') {
-            bridge_fail('php', $run['error'] . "\n" . sb_clip($run['output'], 400));
+        $GLOBALS['BRIDGE_STATE'] = array();
+        $GLOBALS['BRIDGE_DONE'] = false;
+        $GLOBALS['BRIDGE_TICK_DEADLINE'] = microtime(true) + BRIDGE_TICK_SECONDS + 2.0;
+        $output = '';
+        $error = '';
+        ob_start();
+        $level = ob_get_level();
+        $BRIDGE_STATE = &$GLOBALS['BRIDGE_STATE'];
+        $BRIDGE_DONE = &$GLOBALS['BRIDGE_DONE'];
+        try {
+            eval($code);
+        } catch (Throwable $exc) {
+            $error = get_class($exc) . ': ' . $exc->getMessage();
+        }
+        while (ob_get_level() > $level) {
+            $output .= (string) ob_get_clean();
+        }
+        if ($error !== '') {
+            bridge_summary('php snippet failed');
+            bridge_respond(200, 'failed', 'php', '-', array(),
+                $output . 'error: ' . $error . "\n");
         }
         bridge_summary('php snippet (' . strlen($code) . ' bytes)');
-        bridge_respond(200, 'completed', 'php', '-', array(), $run['output'],
-            $run['done'] ? '' : 'snippet did not set $BRIDGE_DONE; use detach=1 for multi-tick work');
+        bridge_respond(200, 'completed', 'php', '-', array(), $output,
+            empty($GLOBALS['BRIDGE_DONE']) ? 'snippet did not set $BRIDGE_DONE; use detach=1 for multi-tick work' : '');
     }
 
     $id = bridge_id();
-    $job = array(
-        'id' => $id,
-        'op' => 'php',
-        'code' => $code,
-        'state' => array(),
-        'status' => 'running',
-        'ticks' => 0,
-        'created' => time(),
-    );
+    $job = array('id' => $id, 'op' => 'php', 'code' => $code, 'state' => array(),
+                 'status' => 'running', 'ticks' => 0, 'created' => time());
     bridge_job_save($id, $job);
     $status = bridge_job_tick($job, $id);
     bridge_summary('php job ' . $id . ' (' . strlen($code) . ' bytes)');
     bridge_respond(200, $status === 'failed' ? 'failed' : 'queued', 'php', $id,
         array('ticks' => 1), bridge_job_output($id),
-        $status === 'running'
-            ? 'job ' . $id . ' continues; poll op=job&id=' . $id
-            : 'job finished in one tick');
+        $status === 'running' ? 'job ' . $id . ' continues; poll op=job&id=' . $id
+                              : 'job finished in one tick');
 }
 
 function bridge_op_job(): void
@@ -995,14 +955,11 @@ function bridge_op_jobs(): void
             continue;
         }
         $id = isset($data['id']) ? (string) $data['id'] : '';
-        $lines[] = sprintf(
-            '%s %-9s %2d ticks %8d bytes  %s',
-            $id,
+        $lines[] = sprintf('%s %-9s %2d ticks %8d bytes  %s', $id,
             isset($data['status']) ? $data['status'] : '?',
             isset($data['ticks']) ? (int) $data['ticks'] : 0,
             strlen(bridge_job_output($id)),
-            isset($data['created']) ? date('Y-m-d H:i:s', (int) $data['created']) : '?'
-        );
+            isset($data['created']) ? date('Y-m-d H:i:s', (int) $data['created']) : '?');
     }
     bridge_summary('listed jobs');
     bridge_respond(200, 'completed', 'jobs', '-', array(),
@@ -1024,11 +981,51 @@ function bridge_op_cancel(): void
 
 /* -------------------------------------------------------------------- boot */
 
-/** Called from a long snippet: seconds left in this tick. */
+/** Call from a long snippet: seconds left in this tick. */
 function bridge_tick_left(): float
 {
     $deadline = isset($GLOBALS['BRIDGE_TICK_DEADLINE']) ? (float) $GLOBALS['BRIDGE_TICK_DEADLINE'] : 0.0;
     return $deadline > 0.0 ? $deadline - microtime(true) : 0.0;
+}
+
+function bridge_recent_failures(array $state): int
+{
+    $ip = bridge_ip();
+    $cutoff = time() - 60;
+    $count = 0;
+    foreach ($state['activity'] as $row) {
+        if (($row['status'] ?? '') !== 'unauthorized') {
+            continue;
+        }
+        if (($row['ip'] ?? '') !== $ip) {
+            continue;
+        }
+        $stamp = isset($row['ts']) ? strtotime((string) $row['ts']) : 0;
+        if ($stamp >= $cutoff) {
+            $count++;
+        }
+    }
+    return $count;
+}
+
+function bridge_recent_writes(array $state, string $token): int
+{
+    $cutoff = time() - 60;
+    $writes = array('write', 'edit', 'mkdir', 'rm', 'upload', 'php', 'cancel');
+    $count = 0;
+    foreach ($state['activity'] as $row) {
+        if (!in_array($row['op'] ?? '', $writes, true)) {
+            continue;
+        }
+        if (($row['token'] ?? '') !== $token) {
+            continue;
+        }
+        $stamp = isset($row['ts']) ? strtotime((string) $row['ts']) : 0;
+        if ($stamp >= $cutoff) {
+            $count++;
+        }
+    }
+    return $count;
 }
 
 function bridge_boot(): void
@@ -1050,30 +1047,37 @@ function bridge_boot(): void
 
     @set_time_limit(20);
 
-    if (!sb_config_ready()) {
+    if (is_file(__DIR__ . '/bridge.disabled')) {
         bridge_respond(503, 'failed', '-', '-', array(),
-            "error: site_bridge is not configured. Create bridge.secrets.php (see "
-            . 'bridge.secrets.example.php), upload it, and open setup.php once.');
+            'error: disabled; delete bridge.disabled to re-enable this bridge');
     }
-    try {
-        $link = sb_db();
-    } catch (Throwable $exc) {
+
+    $state = bridge_state_load();
+    $GLOBALS['bridge_state'] = $state;
+    if (!bridge_installed()) {
         bridge_respond(503, 'failed', '-', '-', array(),
-            'error: ' . $exc->getMessage());
-    }
-    $GLOBALS['bridge_link'] = $link;
-    if (!sb_installed($link)) {
-        bridge_respond(503, 'failed', '-', '-', array(),
-            'error: the database has no tables or no admin password yet; open setup.php once.');
+            'error: not set up yet. Open setup.php, choose the admin password, then retry.');
     }
 
     list($token, $op) = bridge_route();
     $GLOBALS['bridge_context']['op'] = $op === '' ? '-' : $op;
 
-    $row = sb_token_lookup($link, $token);
-    if (!$row) {
-        $failures = sb_recent_auth_failures($link, sb_ip());
-        sb_log($link, null, 'auth', 'token rejected from ' . sb_ip(), 'unauthorized', 0, 0);
+    $record = null;
+    foreach ($state['tokens'] as $candidate) {
+        if (isset($candidate['token']) && is_string($candidate['token'])
+                && hash_equals($candidate['token'], $token)) {
+            $record = $candidate;
+            break;
+        }
+    }
+    $usable = false;
+    if ($record !== null) {
+        $expired = !empty($record['expires']) && (int) $record['expires'] <= time();
+        $usable = empty($record['revoked']) && !$expired;
+    }
+    if (!$usable) {
+        $failures = bridge_recent_failures($state);
+        bridge_record('auth', 'unauthorized', 0, 'token rejected from ' . bridge_ip());
         if ($failures >= BRIDGE_AUTH_FAILURES_PER_MINUTE) {
             bridge_respond(429, 'failed', $op === '' ? '-' : $op, '-', array(),
                 'error: too many rejected tokens from this address; wait a minute.');
@@ -1082,82 +1086,36 @@ function bridge_boot(): void
             'error: unauthorized. This token is unknown, expired or revoked. '
             . 'The user issues tokens in the panel (index.php); ask them for a fresh one.');
     }
-    $GLOBALS['bridge_context']['token_id'] = (int) $row['id'];
-    sb_token_touch($link, (int) $row['id']);
+
+    $label = isset($record['label']) ? (string) $record['label'] : '';
+    $GLOBALS['bridge_context']['token'] = $label !== '' ? $label : substr((string) $record['token'], 0, 11);
 
     if ($op === '') {
         bridge_fail('-', 'missing op=; try op=help');
     }
 
     $readOnly = in_array($op, array('ping', 'help', 'selftest', 'ls', 'read', 'jobs', 'job'), true);
-    if (!$readOnly) {
-        $recent = $link->prepare(
-            'SELECT COUNT(*) AS n FROM sb_activity WHERE token_id = ? '
-            . 'AND op IN (\'write\', \'edit\', \'mkdir\', \'rm\', \'upload\', \'sql\', \'php\', \'cancel\') '
-            . 'AND ts > (NOW() - INTERVAL 60 SECOND)'
-        );
-        if ($recent) {
-            $tokenId = (int) $row['id'];
-            $recent->bind_param('i', $tokenId);
-            $recent->execute();
-            $result = $recent->get_result();
-            $counts = $result ? $result->fetch_assoc() : null;
-            $recent->close();
-            if ($counts && (int) $counts['n'] >= BRIDGE_WRITES_PER_MINUTE) {
-                bridge_respond(429, 'failed', $op, '-', array(),
-                    'error: more than ' . BRIDGE_WRITES_PER_MINUTE . ' writes in a minute for this token.');
-            }
-        }
+    if (!$readOnly && bridge_recent_writes($state, $GLOBALS['bridge_context']['token']) >= BRIDGE_WRITES_PER_MINUTE) {
+        bridge_respond(429, 'failed', $op, '-', array(),
+            'error: more than ' . BRIDGE_WRITES_PER_MINUTE . ' writes in a minute for this token.');
     }
 
     switch ($op) {
-        case 'ping':
-            bridge_op_ping();
-            break;
-        case 'help':
-            bridge_op_help();
-            break;
-        case 'selftest':
-            bridge_op_selftest();
-            break;
-        case 'ls':
-            bridge_op_ls();
-            break;
-        case 'read':
-            bridge_op_read();
-            break;
-        case 'write':
-            bridge_op_write();
-            break;
-        case 'edit':
-            bridge_op_edit();
-            break;
-        case 'mkdir':
-            bridge_op_mkdir();
-            break;
-        case 'rm':
-            bridge_op_rm();
-            break;
-        case 'sql':
-            bridge_op_sql();
-            break;
-        case 'upload':
-            bridge_op_upload();
-            break;
-        case 'php':
-            bridge_op_php();
-            break;
-        case 'job':
-            bridge_op_job();
-            break;
-        case 'jobs':
-            bridge_op_jobs();
-            break;
-        case 'cancel':
-            bridge_op_cancel();
-            break;
-        default:
-            bridge_fail($op, 'unknown op "' . $op . '"; try op=help');
+        case 'ping':   bridge_op_ping();   break;
+        case 'help':   bridge_op_help();   break;
+        case 'selftest': bridge_op_selftest(); break;
+        case 'ls':     bridge_op_ls();     break;
+        case 'read':   bridge_op_read();   break;
+        case 'write':  bridge_op_write();  break;
+        case 'edit':   bridge_op_edit();   break;
+        case 'mkdir':  bridge_op_mkdir();  break;
+        case 'rm':     bridge_op_rm();     break;
+        case 'upload': bridge_op_upload(); break;
+        case 'php':    bridge_op_php();    break;
+        case 'job':    bridge_op_job();    break;
+        case 'jobs':   bridge_op_jobs();   break;
+        case 'cancel': bridge_op_cancel(); break;
+        default:       bridge_fail($op, 'unknown op "' . $op . '"; try op=help');
     }
 }
 
